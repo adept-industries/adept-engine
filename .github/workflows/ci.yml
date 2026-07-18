@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  repository-checks:
+    name: Repository checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Verify required foundation files
+        shell: bash
+        run: |
+          test -f README.md
+          test -f .gitignore
+          test -f .editorconfig
+          test -f PROJECT_POLICY.md
+          test -f .github/CODEOWNERS
+          test -f .github/pull_request_template.md
+
+      - name: Reject committed local environment files
+        shell: bash
+        run: |
+          tracked_env_files="$(
+            git ls-files |
+            grep -E '(^|/)\.env($|\.)' |
+            grep -vE '(^|/)\.env\.example$' ||
+            true
+          )"
+
+          if [ -n "$tracked_env_files" ]; then
+            echo "Local environment files must not be committed:"
+            echo "$tracked_env_files"
+            exit 1
+          fi
+
+      - name: Repository foundation passed
+        run: echo "Repository foundation checks passed."
