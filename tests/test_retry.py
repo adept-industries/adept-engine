@@ -43,12 +43,12 @@ def test_failure_retries_or_becomes_dead(
     claim_jobs(database_engine, "retry-worker", 1)
     assert (
         mark_failed(
-    database_engine,
-    retry_id,
-    "retry-worker",
-    "temporary provider error\nwith details",
-    jitter_seconds=0,
-)
+            database_engine,
+            retry_id,
+            "retry-worker",
+            "temporary provider error\nwith details",
+            jitter_seconds=0,
+        )
         == "FAILED"
     )
     retry_row = job_factory.row(retry_id)
@@ -60,12 +60,12 @@ def test_failure_retries_or_becomes_dead(
     claim_jobs(database_engine, "dead-worker", 1)
     assert (
         mark_failed(
-    database_engine,
-    dead_id,
-    "dead-worker",
-    "final failure",
-    jitter_seconds=0,
-)
+            database_engine,
+            dead_id,
+            "dead-worker",
+            "final failure",
+            jitter_seconds=0,
+        )
         == "DEAD"
     )
     dead_row = job_factory.row(dead_id)
