@@ -12,10 +12,7 @@ class Settings(BaseSettings):
     postgres_port: int = Field(default=5432, ge=1, le=65535)
     postgres_db: str = "adept"
     postgres_user: str = "adept"
-    postgres_password: SecretStr = Field(
-        default=SecretStr(""),
-        validate_default=False,
-    )
+    postgres_password: SecretStr
 
     engine_poll_interval_ms: int = Field(default=1000, ge=100, le=60_000)
     engine_worker_id: str = Field(default="local-worker-1", min_length=1, max_length=128)
@@ -35,4 +32,4 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    return Settings()  # type: ignore[call-arg]
