@@ -3,46 +3,129 @@ name: CI
 on:
   pull_request:
   push:
-    branches:
-      - main
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
-  repository-checks:
-    name: Repository checks
+  quality:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.16"
+          enable-cache: true
+
+      - name: Install Python 3.14 and locked dependencies
+        run: |
+          uv python install 3.14
+          uv sync --locked
+
+      - name: Ruff format
+        run: uv run ruff format --check .
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Type check
+        run: uv run mypy app tests
+
+      - name: Unit tests
+        run: uv run pytest -m "not integration"
+
+      - name: Build image
+        run: docker build --tag adept-engine:ci .
+
+  database-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: adept_engine_test
+          POSTGRES_USER: adept
+          POSTGRES_PASSWORD: adept_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U adept -d adept_engine_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
 
     steps:
-      - name: Check out repository
+      - name: Check out engine
         uses: actions/checkout@v6
+        with:
+          path: adept-engine
 
-      - name: Verify required foundation files
-        shell: bash
+      - name: Check out API migrations
+        uses: actions/checkout@v6
+        with:
+          repository: adept-industries/adept-api
+          token: ${{ secrets.ADEPT_CROSS_REPO_READ_TOKEN }}
+          path: adept-api
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+          cache-dependency-path: adept-api/pom.xml
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.16"
+          enable-cache: true
+          cache-dependency-glob: adept-engine/uv.lock
+
+      - name: Start API so real Flyway V1-V7 migrates PostgreSQL
+        working-directory: adept-api
+        env:
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/adept_engine_test
+          SPRING_DATASOURCE_USERNAME: adept
+          SPRING_DATASOURCE_PASSWORD: adept_test_password
+          SPRING_MAIL_HOST: localhost
+          SPRING_MAIL_PORT: "1025"
+          APP_FRONTEND_BASE_URL: http://localhost:3000
+          APP_EMAIL_FROM: Adept CI <test@adept.local>
+          APP_JWT_SECRET_BASE64: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          APP_TOKEN_HASH_PEPPER_BASE64: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA=
+          APP_INTEGRATION_ENCRYPTION_ACTIVE_KEY_VERSION: "1"
+          APP_INTEGRATION_ENCRYPTION_KEY_V1_BASE64: CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA=
+          APP_INTERNAL_ENGINE_TOKEN: ci-engine-token
+          GITHUB_INTEGRATION_ENABLED: "false"
+          JIRA_INTEGRATION_ENABLED: "false"
         run: |
-          test -f README.md
-          test -f .gitignore
-          test -f .editorconfig
-          test -f PROJECT_POLICY.md
-          test -f .github/CODEOWNERS
-          test -f .github/pull_request_template.md
+          ./mvnw -B -DskipTests spring-boot:run > ../api.log 2>&1 &
+          echo $! > ../api.pid
+          for attempt in {1..60}; do
+            if curl -fsS http://localhost:8080/actuator/health/readiness; then
+              exit 0
+            fi
+            sleep 2
+          done
+          cat ../api.log
+          exit 1
 
-      - name: Reject committed local environment files
-        shell: bash
+      - name: Run engine database tests against API schema
+        working-directory: adept-engine
+        env:
+          ENGINE_TEST_DATABASE_ALLOWED: "true"
+          TEST_DATABASE_URL: postgresql+psycopg://adept:adept_test_password@localhost:5432/adept_engine_test
         run: |
-          tracked_env_files="$(
-            git ls-files |
-            grep -E '(^|/)\.env($|\.)' |
-            grep -vE '(^|/)\.env\.example$' ||
-            true
-          )"
+          uv python install 3.14
+          uv sync --locked
+          uv run pytest -m integration
 
-          if [ -n "$tracked_env_files" ]; then
-            echo "Local environment files must not be committed:"
-            echo "$tracked_env_files"
-            exit 1
-          fi
+      - name: Show API log on failure
+        if: failure()
+        run: cat api.log
 
-      - name: Repository foundation passed
-        run: echo "Repository foundation checks passed."
+      - name: Stop API
+        if: always()
+        run: |
+          if [ -f api.pid ]; then kill "$(cat api.pid)" || true; fi
