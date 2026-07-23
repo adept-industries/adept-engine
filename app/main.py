@@ -8,9 +8,11 @@ app = FastAPI(
 
 @app.get("/")
 def root():
-    return {"message": "Adept Engine Running"}
+    return {"service": "adept-engine"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "UP"}
+    return {
+        "status": "UP"
+    }
