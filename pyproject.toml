@@ -1,0 +1,49 @@
+[project]
+name = "adept-engine"
+version = "0.1.0"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+  "fastapi>=0.115,<1.0",
+  "uvicorn[standard]>=0.34,<1.0",
+  "sqlalchemy>=2.0,<3.0",
+  "psycopg[binary]>=3.2.8,<4.0",
+  "pydantic-settings>=2.8,<3.0",
+  "httpx>=0.28,<1.0",
+  "cryptography>=44,<46",
+  "scikit-learn==1.9.0",
+  "joblib>=1.4,<2.0",
+  "numpy>=2.0,<3.0",
+  "structlog>=25,<26"
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8,<9",
+  "pytest-asyncio>=0.25,<1.0",
+  "pytest-cov>=6,<7",
+  "ruff>=0.9,<1.0",
+  "mypy>=1.14,<2.0",
+  "testcontainers[postgres]>=4.9,<5.0"
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.14"
+check_untyped_defs = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --cov=app --cov-report=term-missing"
+markers = [
+  "integration: requires PostgreSQL with the API Flyway V1-V7 schema"
+]
