@@ -2,10 +2,10 @@ FROM python:3.14-slim
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.16 /uv /uvx /bin/
 
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 UV_NO_CACHE=1
 WORKDIR /app
 
-RUN addgroup --system adept && adduser --system --ingroup adept adept
+RUN addgroup --system adept && adduser --system --home /home/adept --ingroup adept adept
 
 COPY pyproject.toml uv.lock ./
 RUN uv sync --locked --no-dev --no-install-project
