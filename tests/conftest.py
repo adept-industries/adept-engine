@@ -6,6 +6,8 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import Engine, create_engine, text
 
+from app.db.session import SUPPORTED_SCHEMA_VERSIONS
+
 
 class JobFactory:
     def __init__(self, database_engine: Engine) -> None:
@@ -95,8 +97,8 @@ def database_engine() -> Iterator[Engine]:
                 """
             )
         ).scalar_one_or_none()
-    if str(version) != "7":
-        pytest.fail("integration database must contain API Flyway V1-V7")
+    if str(version) not in SUPPORTED_SCHEMA_VERSIONS:
+        pytest.fail("integration database must contain supported API Flyway V7 or V8")
 
     yield engine
     engine.dispose()

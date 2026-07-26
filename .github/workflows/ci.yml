@@ -81,7 +81,7 @@ jobs:
           enable-cache: true
           cache-dependency-glob: adept-engine/uv.lock
 
-      - name: Start API so real Flyway V1-V7 migrates PostgreSQL
+      - name: Start API so real Flyway migrations run on PostgreSQL
         working-directory: adept-api
         env:
           SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/adept_engine_test
