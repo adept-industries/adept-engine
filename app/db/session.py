@@ -4,6 +4,8 @@ from sqlalchemy import Engine, create_engine, text
 
 from app.core.config import get_settings
 
+SUPPORTED_SCHEMA_VERSIONS = frozenset({"7", "8"})
+
 
 @lru_cache
 def get_database_engine() -> Engine:
@@ -29,6 +31,7 @@ def current_schema_version(database_engine: Engine) -> str:
             text("SELECT to_regclass('public.processing_jobs')::text")
         ).scalar_one_or_none()
 
-    if str(version) != "7" or processing_jobs != "processing_jobs":
-        raise RuntimeError("Flyway V1-V7 schema is not ready")
-    return str(version)
+    schema_version = str(version)
+    if schema_version not in SUPPORTED_SCHEMA_VERSIONS or processing_jobs != "processing_jobs":
+        raise RuntimeError("supported Flyway schema V7 or V8 is not ready")
+    return schema_version
