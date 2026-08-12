@@ -6,7 +6,7 @@ The engine is Adept's internal Python process and background-worker foundation.
 
 Phase 1 provides Python 3.14, FastAPI health/readiness, SQLAlchemy access to the shared database, safe job-claim/retry primitives, tests, and a container image. The running worker intentionally remains idle until real handlers arrive in Phase 5.
 
-The API's Flyway migrations exclusively own the schema. The engine supports schema versions 7 and 8 during the forward-compatible rollout and must not add Alembic or create tables.
+The API's Flyway migrations exclusively own the schema. The engine supports schema versions 7, 8, and 9 during the forward-compatible rollout and must not add Alembic or create tables.
 
 ## Install
 
@@ -28,7 +28,7 @@ uv run uvicorn app.main:app --reload --port 8000
 ```
 
 - `GET /health` checks only process liveness.
-- `GET /ready` requires PostgreSQL and a supported Flyway V7 or V8 schema.
+- `GET /ready` requires PostgreSQL and a supported Flyway V7, V8, or V9 schema.
 
 ## Quality checks
 
