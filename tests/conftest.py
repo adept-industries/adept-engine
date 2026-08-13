@@ -98,7 +98,7 @@ def database_engine() -> Iterator[Engine]:
             )
         ).scalar_one_or_none()
     if str(version) not in SUPPORTED_SCHEMA_VERSIONS:
-        pytest.fail("integration database must contain supported API Flyway V7, V8, or V9")
+        pytest.fail("integration database must contain supported API Flyway V7, V8, V9, or V10")
 
     yield engine
     engine.dispose()
