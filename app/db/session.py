@@ -4,7 +4,7 @@ from sqlalchemy import Engine, create_engine, text
 
 from app.core.config import get_settings
 
-SUPPORTED_SCHEMA_VERSIONS = frozenset({"7", "8", "9", "10"})
+SUPPORTED_SCHEMA_VERSIONS = frozenset({"7", "8", "9", "10", "11"})
 
 
 @lru_cache

@@ -6,7 +6,7 @@ The engine is Adept's internal Python process and background-worker foundation.
 
 Phase 1 provides Python 3.14, FastAPI health/readiness, SQLAlchemy access to the shared database, safe job-claim/retry primitives, tests, and a container image. The running worker intentionally remains idle until real handlers arrive in Phase 5.
 
-The API's Flyway migrations exclusively own the schema. The engine supports schema versions 7, 8, 9, and 10 during the forward-compatible rollout and must not add Alembic or create tables.
+The API's Flyway migrations exclusively own the schema. The engine supports schema versions 7, 8, 9, 10, and 11 during the forward-compatible rollout and must not add Alembic or create tables.
 
 ## Install
 
