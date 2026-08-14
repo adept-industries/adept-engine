@@ -28,7 +28,7 @@ uv run uvicorn app.main:app --reload --port 8000
 ```
 
 - `GET /health` checks only process liveness.
-- `GET /ready` requires PostgreSQL and a supported Flyway V7, V8, V9, or V10 schema.
+- `GET /ready` requires PostgreSQL and a supported Flyway V7, V8, V9, V10, or V11 schema.
 
 ## Quality checks
 
@@ -46,3 +46,14 @@ Database integration tests require a disposable API-migrated database, `TEST_DAT
 ```bash
 docker build -t adept-engine:phase1 .
 ```
+
+After the complete `CI` workflow succeeds for a push to `main`, the publish
+workflow builds Linux AMD64 and pushes exactly one immutable image tag:
+
+```text
+ghcr.io/adept-industries/adept-engine:sha-<full-commit>
+```
+
+Pull-request runs, failed CI runs, and non-main branches never publish. The
+workflow uses GitHub's short-lived `GITHUB_TOKEN`; it does not require a PAT or
+any application/AWS secret.
