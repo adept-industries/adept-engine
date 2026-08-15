@@ -6,7 +6,7 @@ from app.db.models import ClaimedJob
 from app.jobs.dispatcher import HANDLERS, dispatch_job
 
 
-def test_dispatcher_handles_backfill_repository():
+def test_dispatcher_handles_backfill_repository() -> None:
     engine = MagicMock()
     job = ClaimedJob(
         id=uuid4(),
@@ -30,7 +30,7 @@ def test_dispatcher_handles_backfill_repository():
     assert "BACKFILL_REPOSITORY" in HANDLERS
 
 
-def test_dispatcher_handles_sync_github_repositories():
+def test_dispatcher_handles_sync_github_repositories() -> None:
     engine = MagicMock()
     job = ClaimedJob(
         id=uuid4(),
@@ -53,7 +53,7 @@ def test_dispatcher_handles_sync_github_repositories():
     assert "SYNC_GITHUB_REPOSITORIES" in HANDLERS
 
 
-def test_dispatcher_handles_jira_jobs():
+def test_dispatcher_handles_jira_jobs() -> None:
     engine = MagicMock()
     job = ClaimedJob(
         id=uuid4(),
