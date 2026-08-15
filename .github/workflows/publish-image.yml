@@ -54,3 +54,18 @@ jobs:
             org.opencontainers.image.title=Adept Engine
           cache-from: type=gha,scope=adept-engine
           cache-to: type=gha,mode=max,scope=adept-engine
+
+      - name: Deploy to AWS Lightsail
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.LIGHTSAIL_HOST }}
+          username: ${{ secrets.LIGHTSAIL_USER }}
+          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          script: |
+            set -eu
+            cd /opt/adept
+            sed -i "s|^ENGINE_IMAGE=.*|ENGINE_IMAGE=ghcr.io/adept-industries/adept-engine:sha-${{ github.event.workflow_run.head_sha }}|" .env.production
+            sudo docker compose --env-file .env.production -f compose.yaml pull engine-api engine-worker
+            sudo docker compose --env-file .env.production -f compose.yaml up -d --no-deps engine-api engine-worker
+            sudo docker compose --env-file .env.production -f compose.yaml ps
+            echo "Engine Deployment Complete!"
