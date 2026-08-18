@@ -9,6 +9,7 @@ can trace any delivery end-to-end.
 Never-retry event types are marked DEAD immediately so they do not fill
 the retry queue with known-permanent failures.
 """
+
 from __future__ import annotations
 
 import json
@@ -29,27 +30,32 @@ logger = structlog.get_logger()
 # Event types the engine handles in Phase 5
 # ---------------------------------------------------------------------------
 # Events not in this set are acknowledged but produce no normalized data yet.
-HANDLED_EVENTS = frozenset({
-    "pull_request",
-    "workflow_run",
-    "deployment_status",
-    "push",
-    "installation",
-    "installation_repositories",
-    "repository",
-})
+HANDLED_EVENTS = frozenset(
+    {
+        "pull_request",
+        "workflow_run",
+        "deployment_status",
+        "push",
+        "installation",
+        "installation_repositories",
+        "repository",
+    }
+)
 
 # Actions that should never be retried because they indicate a permanent
 # condition (unsupported action, unknown event, etc.).
-PERMANENT_FAILURE_REASONS = frozenset({
-    "RAW_EVENT_NOT_FOUND",
-    "WORKSPACE_OR_REPOSITORY_NOT_FOUND",
-})
+PERMANENT_FAILURE_REASONS = frozenset(
+    {
+        "RAW_EVENT_NOT_FOUND",
+        "WORKSPACE_OR_REPOSITORY_NOT_FOUND",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+
 
 def handle_process_github_event(database_engine: Engine, job: ClaimedJob, worker_id: str) -> None:
     """
@@ -76,8 +82,11 @@ def handle_process_github_event(database_engine: Engine, job: ClaimedJob, worker
     if not raw_event_id:
         bound_logger.error("process_github_event_missing_raw_event_id")
         mark_failed(
-            database_engine, job.id, job.locked_by,
-            "rawEventId missing from job payload", permanent=True
+            database_engine,
+            job.id,
+            job.locked_by,
+            "rawEventId missing from job payload",
+            permanent=True,
         )
         return
 
@@ -86,8 +95,11 @@ def handle_process_github_event(database_engine: Engine, job: ClaimedJob, worker
     if raw_event is None:
         bound_logger.error("process_github_event_raw_event_not_found", raw_event_id=raw_event_id)
         mark_failed(
-            database_engine, job.id, job.locked_by,
-            f"RAW_EVENT_NOT_FOUND: {raw_event_id}", permanent=True
+            database_engine,
+            job.id,
+            job.locked_by,
+            f"RAW_EVENT_NOT_FOUND: {raw_event_id}",
+            permanent=True,
         )
         return
 
@@ -140,6 +152,7 @@ def handle_process_github_event(database_engine: Engine, job: ClaimedJob, worker
 # Internal routing
 # ---------------------------------------------------------------------------
 
+
 def _dispatch(
     database_engine: Engine,
     job: ClaimedJob,
@@ -155,9 +168,7 @@ def _dispatch(
             database_engine, payload, action, workspace_id, repository_id, bound_logger
         )
     elif event_type == "workflow_run":
-        _handle_workflow_run(
-            database_engine, payload, workspace_id, repository_id, bound_logger
-        )
+        _handle_workflow_run(database_engine, payload, workspace_id, repository_id, bound_logger)
     elif event_type == "deployment_status":
         _handle_deployment_status(
             database_engine, payload, workspace_id, repository_id, bound_logger
@@ -188,9 +199,13 @@ def _handle_pull_request(
 ) -> None:
     # Supported actions that update the PR state.
     supported_actions = {
-        "opened", "reopened", "synchronize",
+        "opened",
+        "reopened",
+        "synchronize",
         "closed",  # may be a merge
-        "edited", "converted_to_draft", "ready_for_review",
+        "edited",
+        "converted_to_draft",
+        "ready_for_review",
     }
     if action not in supported_actions:
         bound_logger.info(
@@ -269,7 +284,7 @@ def _handle_installation(
     if action == "deleted":
         status = "REVOKED"
     elif action == "suspend":
-        status = "ERROR" # Or a suspended state if we had one
+        status = "ERROR"  # Or a suspended state if we had one
     elif action == "unsuspend" or action == "created":
         status = "ACTIVE"
     else:
@@ -394,18 +409,23 @@ def _handle_repository(
 # DB helpers
 # ---------------------------------------------------------------------------
 
+
 def _load_raw_event(database_engine: Engine, raw_event_id: UUID) -> dict[str, Any] | None:
     with database_engine.connect() as connection:
-        row = connection.execute(
-            text(
-                """
+        row = (
+            connection.execute(
+                text(
+                    """
                 SELECT id, workspace_id, repository_id, event_type, action, payload
                 FROM raw_webhook_events
                 WHERE id = :raw_event_id
                 """
-            ),
-            {"raw_event_id": str(raw_event_id)},
-        ).mappings().one_or_none()
+                ),
+                {"raw_event_id": str(raw_event_id)},
+            )
+            .mappings()
+            .one_or_none()
+        )
 
     if row is None:
         return None

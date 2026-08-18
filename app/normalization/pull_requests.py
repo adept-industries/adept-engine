@@ -7,6 +7,7 @@ that retries and re-deliveries converge on a single correct row.
 
 Unique key: (repository_id, github_pr_id)
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -22,6 +23,7 @@ logger = structlog.get_logger()
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+
 
 def upsert_pull_request(
     database_engine: Engine,
@@ -43,6 +45,7 @@ def upsert_pull_request(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _build_row(
     workspace_id: UUID,
@@ -134,6 +137,7 @@ def _run_upsert(database_engine: Engine, row: dict[str, Any]) -> UUID:
 
     # Serialize raw_data as JSON for psycopg
     import json
+
     params = dict(row)
     params["raw_data"] = json.dumps(params["raw_data"])
 
@@ -146,6 +150,7 @@ def _run_upsert(database_engine: Engine, row: dict[str, Any]) -> UUID:
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
+
 
 def _nested(d: dict[str, Any], *keys: str) -> Any:
     """Safely traverse a nested dict path, returning None on any missing key."""
@@ -164,5 +169,5 @@ def _parse_ts(value: str | None) -> datetime | None:
     try:
         # GitHub timestamps end with 'Z'; Python 3.11+ fromisoformat handles it.
         return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
-    except (ValueError, AttributeError):
+    except ValueError, AttributeError:
         return None

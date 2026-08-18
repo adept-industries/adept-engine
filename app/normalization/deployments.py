@@ -6,6 +6,7 @@ Parses GitHub ``workflow_run`` (completed) and ``deployment_status``
 
 Unique key: (repository_id, source, external_deployment_id)
 """
+
 from __future__ import annotations
 
 import json
@@ -21,6 +22,7 @@ logger = structlog.get_logger()
 # ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
+
 
 def upsert_deployment_from_workflow_run(
     database_engine: Engine,
@@ -64,7 +66,9 @@ def upsert_deployment_from_workflow_run(
         "is_production": is_production,
         "status": status,
         "commit_sha": workflow_run.get("head_sha", ""),
-        "started_at": _parse_ts(workflow_run.get("run_started_at") or workflow_run.get("created_at")),
+        "started_at": _parse_ts(
+            workflow_run.get("run_started_at") or workflow_run.get("created_at")
+        ),
         "finished_at": _parse_ts(workflow_run.get("updated_at")),
         "raw_data": event_data,
     }
@@ -120,6 +124,7 @@ def upsert_deployment_from_deployment_status(
 # Shared upsert
 # ---------------------------------------------------------------------------
 
+
 def _run_upsert(database_engine: Engine, row: dict[str, Any]) -> UUID:
     """
     Insert or update on the unique (repository_id, source, external_deployment_id)
@@ -164,10 +169,11 @@ def _run_upsert(database_engine: Engine, row: dict[str, Any]) -> UUID:
 # Utilities
 # ---------------------------------------------------------------------------
 
+
 def _parse_ts(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
-    except (ValueError, AttributeError):
+    except ValueError, AttributeError:
         return None

@@ -29,12 +29,12 @@ def dispatch_job(database_engine: Engine, job: ClaimedJob, worker_id: str) -> No
         # Unknown job types are a permanent configuration/data error; marking DEAD
         # avoids filling the retry queue with jobs that will never succeed.
         logger.warning(
-            "unsupported_job_type_marked_dead",
-            job_type=job.job_type,
-            job_id=str(job.id)
+            "unsupported_job_type_marked_dead", job_type=job.job_type, job_id=str(job.id)
         )
         mark_failed(
-            database_engine, job.id, worker_id,
+            database_engine,
+            job.id,
+            worker_id,
             f"UNSUPPORTED_JOB_TYPE: {job.job_type}",
             permanent=True,
         )

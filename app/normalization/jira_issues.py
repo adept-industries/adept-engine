@@ -8,6 +8,7 @@ from sqlalchemy import Engine, text
 
 logger = structlog.get_logger()
 
+
 def parse_jira_timestamp(ts: str | None) -> datetime | None:
     if not ts:
         return None
@@ -32,7 +33,7 @@ def upsert_jira_issue(
     """
     issue_id_str = str(issue_payload.get("id"))
     issue_key = issue_payload.get("key")
-    
+
     if not issue_id_str or not issue_key:
         logger.warning(
             "jira_issue_missing_identifiers",
@@ -42,20 +43,20 @@ def upsert_jira_issue(
         return
 
     fields = issue_payload.get("fields", {})
-    
+
     issue_type = fields.get("issuetype", {}).get("name")
     status_name = fields.get("status", {}).get("name")
     priority_name = fields.get("priority", {}).get("name")
     summary = fields.get("summary", "")
-    
+
     # We will let the project mapping rules determine if it's an incident later,
     # but for now we default to false.
     is_incident = False
-    
+
     jira_created_at = parse_jira_timestamp(fields.get("created"))
     jira_updated_at = parse_jira_timestamp(fields.get("updated"))
     resolved_at = parse_jira_timestamp(fields.get("resolutiondate"))
-    
+
     raw_data_json = json.dumps(issue_payload)
 
     with database_engine.begin() as connection:
@@ -128,7 +129,7 @@ def upsert_jira_issue(
                 "raw_data": raw_data_json,
             },
         )
-        
+
         logger.info(
             "jira_issue_upserted",
             workspace_id=str(workspace_id),

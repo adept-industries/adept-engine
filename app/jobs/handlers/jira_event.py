@@ -14,7 +14,9 @@ def handle_process_jira_event(database_engine: Engine, job: ClaimedJob, worker_i
     """
     raw_event_id = job.payload.get("rawEventId")
     if not raw_event_id:
-        mark_failed(database_engine, job.id, worker_id, "Missing rawEventId in payload", permanent=True)
+        mark_failed(
+            database_engine, job.id, worker_id, "Missing rawEventId in payload", permanent=True
+        )
         return
 
     with database_engine.begin() as connection:
@@ -28,17 +30,29 @@ def handle_process_jira_event(database_engine: Engine, job: ClaimedJob, worker_i
         )
 
     if not raw_event:
-        mark_failed(database_engine, job.id, worker_id, f"Raw event {raw_event_id} not found", permanent=True)
+        mark_failed(
+            database_engine,
+            job.id,
+            worker_id,
+            f"Raw event {raw_event_id} not found",
+            permanent=True,
+        )
         return
 
     workspace_id = raw_event["workspace_id"]
     event_type = raw_event["event_type"]
     payload = raw_event["payload"]
     jira_integration_id = job.payload.get("jiraIntegrationId")
-    
+
     if not workspace_id or not jira_integration_id:
         # Without these, we can't map to a project correctly or save it.
-        mark_failed(database_engine, job.id, worker_id, "Missing workspace or integration ID", permanent=True)
+        mark_failed(
+            database_engine,
+            job.id,
+            worker_id,
+            "Missing workspace or integration ID",
+            permanent=True,
+        )
         return
 
     logger.info(
@@ -61,14 +75,21 @@ def handle_process_jira_event(database_engine: Engine, job: ClaimedJob, worker_i
                 return
 
             with database_engine.begin() as connection:
-                project = connection.execute(
-                    text("""
+                project = (
+                    connection.execute(
+                        text("""
                         SELECT id FROM jira_projects 
                         WHERE jira_integration_id = :integration_id 
                         AND jira_project_id = :remote_project_id
                     """),
-                    {"integration_id": jira_integration_id, "remote_project_id": str(project_id_str)}
-                ).mappings().one_or_none()
+                        {
+                            "integration_id": jira_integration_id,
+                            "remote_project_id": str(project_id_str),
+                        },
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
 
             if project:
                 jira_project_id = project["id"]

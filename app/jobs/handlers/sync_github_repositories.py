@@ -5,14 +5,17 @@ from app.jobs.retry import mark_failed, mark_succeeded, requeue_with_payload
 
 logger = structlog.get_logger()
 
-def handle_sync_github_repositories(database_engine: Engine, job: ClaimedJob, worker_id: str) -> None:
+
+def handle_sync_github_repositories(
+    database_engine: Engine, job: ClaimedJob, worker_id: str
+) -> None:
     """
     Stub for paginated github repositories sync.
     Demonstrates cursor pattern for paginated jobs.
     """
     cursor = job.payload.get("cursor")
     workspace_id = job.payload.get("workspaceId")
-    
+
     if not workspace_id:
         mark_failed(database_engine, job.id, worker_id, "Missing workspaceId", permanent=True)
         return
@@ -23,12 +26,12 @@ def handle_sync_github_repositories(database_engine: Engine, job: ClaimedJob, wo
     # 1. client.list_repositories(cursor=cursor)
     # 2. upsert batch
     # 3. next_cursor = result.next_cursor
-    
+
     next_cursor = None
     if cursor is None:
         next_cursor = "page_2"
     elif cursor == "page_2":
-        next_cursor = None # Done
+        next_cursor = None  # Done
 
     if next_cursor:
         job.payload["cursor"] = next_cursor

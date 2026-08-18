@@ -10,6 +10,7 @@ class JobOwnershipError(RuntimeError):
 
 class RequeueWithPayloadError(Exception):
     """Raised when a handler successfully processed a batch but needs to run again with an updated payload cursor."""
+
     pass
 
 
@@ -134,7 +135,7 @@ def requeue_with_payload(
     Used for paginated jobs to persist a cursor.
     """
     import json
-    
+
     with database_engine.begin() as connection:
         result = connection.execute(
             text(
@@ -161,5 +162,5 @@ def requeue_with_payload(
         )
         if result.rowcount != 1:
             raise JobOwnershipError("job is not owned by this worker")
-    
+
     raise RequeueWithPayloadError()

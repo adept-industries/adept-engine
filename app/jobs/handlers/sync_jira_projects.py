@@ -5,15 +5,22 @@ from app.jobs.retry import mark_failed, mark_succeeded, requeue_with_payload
 
 logger = structlog.get_logger()
 
+
 def handle_sync_jira_projects(database_engine: Engine, job: ClaimedJob, worker_id: str) -> None:
     """
     Stub for Jira projects sync.
     """
     workspace_id = job.payload.get("workspaceId")
     integration_id = job.payload.get("jiraIntegrationId")
-    
+
     if not workspace_id or not integration_id:
-        mark_failed(database_engine, job.id, worker_id, "Missing workspaceId or jiraIntegrationId", permanent=True)
+        mark_failed(
+            database_engine,
+            job.id,
+            worker_id,
+            "Missing workspaceId or jiraIntegrationId",
+            permanent=True,
+        )
         return
 
     logger.info("sync_jira_projects_start", job_id=str(job.id))
