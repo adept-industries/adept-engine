@@ -1,9 +1,9 @@
 import json
-import structlog
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+import structlog
 from sqlalchemy import Engine, text
 
 logger = structlog.get_logger()
@@ -105,7 +105,9 @@ def upsert_jira_issue(
                     status_name = EXCLUDED.status_name,
                     priority_name = EXCLUDED.priority_name,
                     summary = EXCLUDED.summary,
-                    jira_created_at = COALESCE(EXCLUDED.jira_created_at, jira_issues.jira_created_at),
+                    jira_created_at = COALESCE(
+                        EXCLUDED.jira_created_at, jira_issues.jira_created_at
+                    ),
                     jira_updated_at = EXCLUDED.jira_updated_at,
                     resolved_at = EXCLUDED.resolved_at,
                     raw_data = EXCLUDED.raw_data,

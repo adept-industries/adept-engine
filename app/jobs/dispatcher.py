@@ -2,13 +2,13 @@ import structlog
 from sqlalchemy import Engine
 
 from app.db.models import ClaimedJob
+from app.jobs.handlers.backfill_repository import handle_backfill_repository
 from app.jobs.handlers.github_event import handle_process_github_event
 from app.jobs.handlers.jira_event import handle_process_jira_event
+from app.jobs.handlers.renew_jira_webhook import handle_renew_jira_webhook
 from app.jobs.handlers.sync_github_repositories import handle_sync_github_repositories
 from app.jobs.handlers.sync_jira_projects import handle_sync_jira_projects
-from app.jobs.handlers.backfill_repository import handle_backfill_repository
-from app.jobs.handlers.renew_jira_webhook import handle_renew_jira_webhook
-from app.jobs.retry import mark_failed, mark_succeeded, RequeueWithPayloadError
+from app.jobs.retry import RequeueWithPayloadError, mark_failed, mark_succeeded
 
 logger = structlog.get_logger()
 
@@ -42,7 +42,8 @@ def dispatch_job(database_engine: Engine, job: ClaimedJob, worker_id: str) -> No
 
     try:
         # Handlers should raise exceptions if they fail, rather than calling mark_failed directly.
-        # This prevents dispatcher double-handling. We pass worker_id to handlers that need to make manual state changes.
+        # This prevents dispatcher double-handling. We pass worker_id to handlers that
+        # need to make manual state changes.
         handler(database_engine, job, worker_id)
         mark_succeeded(database_engine, job.id, worker_id)
         logger.info("job_completed_successfully", job_id=str(job.id), job_type=job.job_type)

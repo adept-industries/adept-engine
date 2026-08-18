@@ -9,7 +9,8 @@ class JobOwnershipError(RuntimeError):
 
 
 class RequeueWithPayloadError(Exception):
-    """Raised when a handler successfully processed a batch but needs to run again with an updated payload cursor."""
+    """Raised when a handler successfully processed a batch but needs to run again
+    with an updated payload cursor."""
 
     pass
 

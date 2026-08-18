@@ -1,5 +1,6 @@
 import structlog
 from sqlalchemy import Engine
+
 from app.db.models import ClaimedJob
 from app.jobs.retry import mark_failed, mark_succeeded, requeue_with_payload
 

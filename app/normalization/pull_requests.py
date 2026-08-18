@@ -10,7 +10,7 @@ Unique key: (repository_id, github_pr_id)
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -168,6 +168,6 @@ def _parse_ts(value: str | None) -> datetime | None:
         return None
     try:
         # GitHub timestamps end with 'Z'; Python 3.11+ fromisoformat handles it.
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
     except ValueError, AttributeError:
         return None
