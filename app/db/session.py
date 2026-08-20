@@ -33,5 +33,7 @@ def current_schema_version(database_engine: Engine) -> str:
 
     schema_version = str(version)
     if schema_version not in SUPPORTED_SCHEMA_VERSIONS or processing_jobs != "processing_jobs":
-        raise RuntimeError("supported Flyway schema V7, V8, V9, or V10 is not ready")
+        raise RuntimeError("supported Flyway schema is not ready")
+    if schema_version in ("11", "12"):
+        return "11"
     return schema_version
