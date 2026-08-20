@@ -106,27 +106,64 @@ def provider_rows(database_engine: Engine) -> Iterator[ProviderRows]:
                 "settings": json.dumps({"deploymentSignal": "WORKFLOW_RUN"}),
             },
         )
-        connection.execute(
-            text(
-                """
-                INSERT INTO jira_integrations (
-                    id, workspace_id, cloud_id, site_url, display_name,
-                    access_token_enc, refresh_token_enc, encryption_key_version,
-                    access_token_expires_at, status, webhook_id,
-                    webhook_expires_at, webhook_token_hash
-                ) VALUES (
-                    :id, :workspace_id, 'cloud-1', 'https://example.atlassian.net',
-                    'Example Jira', 'unused', 'unused', 1, now() + interval '1 day',
-                    'ACTIVE', 991, now() + interval '20 days', :webhook_token_hash
+        has_webhook_token_hash = bool(
+            connection.execute(
+                text(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'jira_integrations'
+                          AND column_name = 'webhook_token_hash'
+                    )
+                    """
                 )
-                """
-            ),
-            {
-                "id": values.jira_integration_id,
-                "workspace_id": values.workspace_id,
-                "webhook_token_hash": "a" * 64,
-            },
+            ).scalar()
         )
+        if has_webhook_token_hash:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO jira_integrations (
+                        id, workspace_id, cloud_id, site_url, display_name,
+                        access_token_enc, refresh_token_enc, encryption_key_version,
+                        access_token_expires_at, status, webhook_id,
+                        webhook_expires_at, webhook_token_hash
+                    ) VALUES (
+                        :id, :workspace_id, 'cloud-1', 'https://example.atlassian.net',
+                        'Example Jira', 'unused', 'unused', 1, now() + interval '1 day',
+                        'ACTIVE', 991, now() + interval '20 days', :webhook_token_hash
+                    )
+                    """
+                ),
+                {
+                    "id": values.jira_integration_id,
+                    "workspace_id": values.workspace_id,
+                    "webhook_token_hash": "a" * 64,
+                },
+            )
+        else:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO jira_integrations (
+                        id, workspace_id, cloud_id, site_url, display_name,
+                        access_token_enc, refresh_token_enc, encryption_key_version,
+                        access_token_expires_at, status, webhook_id,
+                        webhook_expires_at
+                    ) VALUES (
+                        :id, :workspace_id, 'cloud-1', 'https://example.atlassian.net',
+                        'Example Jira', 'unused', 'unused', 1, now() + interval '1 day',
+                        'ACTIVE', 991, now() + interval '20 days'
+                    )
+                    """
+                ),
+                {
+                    "id": values.jira_integration_id,
+                    "workspace_id": values.workspace_id,
+                },
+            )
         connection.execute(
             text(
                 """
