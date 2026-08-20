@@ -20,7 +20,7 @@ import structlog
 from sqlalchemy import Engine, text
 
 from app.db.models import ClaimedJob
-from app.jobs.retry import mark_failed
+from app.jobs.retry import PermanentJobError
 from app.normalization import deployments as deployment_normalizer
 from app.normalization import pull_requests as pr_normalizer
 
@@ -81,27 +81,13 @@ def handle_process_github_event(database_engine: Engine, job: ClaimedJob, worker
 
     if not raw_event_id:
         bound_logger.error("process_github_event_missing_raw_event_id")
-        mark_failed(
-            database_engine,
-            job.id,
-            job.locked_by,
-            "rawEventId missing from job payload",
-            permanent=True,
-        )
-        return
+        raise PermanentJobError("rawEventId missing from job payload")
 
     # 1. Load the raw event to get payload, workspace_id, and repository_id.
     raw_event = _load_raw_event(database_engine, UUID(str(raw_event_id)))
     if raw_event is None:
         bound_logger.error("process_github_event_raw_event_not_found", raw_event_id=raw_event_id)
-        mark_failed(
-            database_engine,
-            job.id,
-            job.locked_by,
-            f"RAW_EVENT_NOT_FOUND: {raw_event_id}",
-            permanent=True,
-        )
-        return
+        raise PermanentJobError(f"RAW_EVENT_NOT_FOUND: {raw_event_id}")
 
     workspace_id_raw = raw_event.get("workspace_id")
     repository_id_raw = raw_event.get("repository_id")

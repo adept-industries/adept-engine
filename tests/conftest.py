@@ -1,3 +1,4 @@
+import json
 import os
 from collections.abc import Iterator
 from typing import Any
@@ -17,12 +18,16 @@ class JobFactory:
     def insert(
         self,
         *,
+        job_type: str = "RECALCULATE_METRICS",
+        payload: dict[str, Any] | None = None,
         status: str = "PENDING",
         priority: int = 100,
         attempts: int = 0,
         max_attempts: int = 8,
         available_offset_seconds: int = 0,
         created_offset_seconds: int = 0,
+        locked_by: str | None = None,
+        locked_offset_seconds: int | None = None,
     ) -> UUID:
         job_id = uuid4()
         with self.database_engine.begin() as connection:
@@ -30,12 +35,16 @@ class JobFactory:
                 text(
                     """
                     INSERT INTO processing_jobs (
-                        id, job_type, status, priority, attempts, max_attempts,
-                        available_at, created_at, updated_at
+                        id, job_type, payload, status, priority, attempts, max_attempts,
+                        available_at, locked_at, locked_by, created_at, updated_at
                     ) VALUES (
-                        :id, 'RECALCULATE_METRICS', :status, :priority,
+                        :id, :job_type, CAST(:payload AS jsonb), :status, :priority,
                         :attempts, :max_attempts,
                         now() + make_interval(secs => :available_offset),
+                        now() + make_interval(
+                            secs => CAST(:locked_offset AS double precision)
+                        ),
+                        :locked_by,
                         now() + make_interval(secs => :created_offset),
                         now()
                     )
@@ -43,11 +52,15 @@ class JobFactory:
                 ),
                 {
                     "id": job_id,
+                    "job_type": job_type,
+                    "payload": json.dumps(payload or {}),
                     "status": status,
                     "priority": priority,
                     "attempts": attempts,
                     "max_attempts": max_attempts,
                     "available_offset": available_offset_seconds,
+                    "locked_offset": locked_offset_seconds,
+                    "locked_by": locked_by,
                     "created_offset": created_offset_seconds,
                 },
             )

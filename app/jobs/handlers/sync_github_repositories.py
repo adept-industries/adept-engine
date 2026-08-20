@@ -2,7 +2,7 @@ import structlog
 from sqlalchemy import Engine
 
 from app.db.models import ClaimedJob
-from app.jobs.retry import mark_failed, mark_succeeded, requeue_with_payload
+from app.jobs.retry import PermanentJobError, requeue_with_payload
 
 logger = structlog.get_logger()
 
@@ -18,8 +18,7 @@ def handle_sync_github_repositories(
     workspace_id = job.payload.get("workspaceId")
 
     if not workspace_id:
-        mark_failed(database_engine, job.id, worker_id, "Missing workspaceId", permanent=True)
-        return
+        raise PermanentJobError("Missing workspaceId")
 
     logger.info("sync_github_repositories_start", job_id=str(job.id), cursor=cursor)
 
@@ -35,9 +34,13 @@ def handle_sync_github_repositories(
         next_cursor = None  # Done
 
     if next_cursor:
-        job.payload["cursor"] = next_cursor
         logger.info("sync_github_repositories_requeue", job_id=str(job.id), next_cursor=next_cursor)
-        requeue_with_payload(database_engine, job.id, worker_id, job.payload, delay_seconds=2.0)
+        requeue_with_payload(
+            database_engine,
+            job.id,
+            worker_id,
+            {**job.payload, "cursor": next_cursor},
+            delay_seconds=2.0,
+        )
     else:
         logger.info("sync_github_repositories_done", job_id=str(job.id))
-        mark_succeeded(database_engine, job.id, worker_id)

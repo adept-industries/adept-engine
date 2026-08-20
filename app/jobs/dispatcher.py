@@ -8,7 +8,7 @@ from app.jobs.handlers.jira_event import handle_process_jira_event
 from app.jobs.handlers.renew_jira_webhook import handle_renew_jira_webhook
 from app.jobs.handlers.sync_github_repositories import handle_sync_github_repositories
 from app.jobs.handlers.sync_jira_projects import handle_sync_jira_projects
-from app.jobs.retry import RequeueWithPayloadError, mark_failed, mark_succeeded
+from app.jobs.retry import PermanentJobError, RequeueWithPayloadError, mark_failed, mark_succeeded
 
 logger = structlog.get_logger()
 
@@ -41,15 +41,22 @@ def dispatch_job(database_engine: Engine, job: ClaimedJob, worker_id: str) -> No
         return
 
     try:
-        # Handlers should raise exceptions if they fail, rather than calling mark_failed directly.
-        # This prevents dispatcher double-handling. We pass worker_id to handlers that
-        # need to make manual state changes.
+        # Handlers own business work only. They return on success, raise
+        # PermanentJobError for non-retryable input, or use the explicit requeue
+        # signal for paginated work. The dispatcher alone writes terminal states.
         handler(database_engine, job, worker_id)
-        mark_succeeded(database_engine, job.id, worker_id)
-        logger.info("job_completed_successfully", job_id=str(job.id), job_type=job.job_type)
     except RequeueWithPayloadError:
-        # Requeue was already handled by the handler; just exit cleanly
-        pass
+        logger.info("job_requeued", job_id=str(job.id), job_type=job.job_type)
+        return
+    except PermanentJobError as exc:
+        logger.warning(
+            "job_permanent_failure",
+            job_id=str(job.id),
+            job_type=job.job_type,
+            error=str(exc),
+        )
+        mark_failed(database_engine, job.id, worker_id, str(exc), permanent=True)
+        return
     except Exception as exc:
         logger.error(
             "job_execution_failed",
@@ -58,3 +65,10 @@ def dispatch_job(database_engine: Engine, job: ClaimedJob, worker_id: str) -> No
             error=str(exc),
         )
         mark_failed(database_engine, job.id, worker_id, str(exc))
+        return
+
+    # Keep this outside the handler try/except. If ownership was lost while the
+    # handler ran, mark_succeeded must surface that operational error instead of
+    # incorrectly attempting a second state transition through mark_failed.
+    mark_succeeded(database_engine, job.id, worker_id)
+    logger.info("job_completed_successfully", job_id=str(job.id), job_type=job.job_type)

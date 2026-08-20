@@ -8,6 +8,10 @@ class JobOwnershipError(RuntimeError):
     pass
 
 
+class PermanentJobError(RuntimeError):
+    """Raised when retrying a job cannot make it succeed."""
+
+
 class RequeueWithPayloadError(Exception):
     """Raised when a handler successfully processed a batch but needs to run again
     with an updated payload cursor."""
