@@ -2,7 +2,7 @@ import structlog
 from sqlalchemy import Engine, text
 
 from app.db.models import ClaimedJob
-from app.jobs.retry import mark_failed, mark_succeeded
+from app.jobs.retry import PermanentJobError
 
 logger = structlog.get_logger()
 
@@ -14,8 +14,7 @@ def handle_renew_jira_webhook(database_engine: Engine, job: ClaimedJob, worker_i
     integration_id = job.payload.get("jiraIntegrationId")
 
     if not integration_id:
-        mark_failed(database_engine, job.id, worker_id, "Missing jiraIntegrationId", permanent=True)
-        return
+        raise PermanentJobError("Missing jiraIntegrationId")
 
     logger.info("renew_jira_webhook_start", job_id=str(job.id), integration_id=integration_id)
 
@@ -38,4 +37,3 @@ def handle_renew_jira_webhook(database_engine: Engine, job: ClaimedJob, worker_i
         )
 
     logger.info("renew_jira_webhook_done", job_id=str(job.id))
-    mark_succeeded(database_engine, job.id, worker_id)
