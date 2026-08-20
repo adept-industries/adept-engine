@@ -35,6 +35,7 @@ def test_expected_phase_five_handlers_are_registered() -> None:
         "SYNC_GITHUB_REPOSITORIES",
         "SYNC_JIRA_PROJECTS",
         "RENEW_JIRA_WEBHOOK",
+        "DELETE_WORKSPACE",
     }.issubset(HANDLERS)
 
 

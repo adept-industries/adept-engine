@@ -3,6 +3,7 @@ from sqlalchemy import Engine
 
 from app.db.models import ClaimedJob
 from app.jobs.handlers.backfill_repository import handle_backfill_repository
+from app.jobs.handlers.delete_workspace import handle_delete_workspace
 from app.jobs.handlers.github_event import handle_process_github_event
 from app.jobs.handlers.jira_event import handle_process_jira_event
 from app.jobs.handlers.renew_jira_webhook import handle_renew_jira_webhook
@@ -20,6 +21,7 @@ HANDLERS = {
     "SYNC_GITHUB_REPOSITORIES": handle_sync_github_repositories,
     "SYNC_JIRA_PROJECTS": handle_sync_jira_projects,
     "RENEW_JIRA_WEBHOOK": handle_renew_jira_webhook,
+    "DELETE_WORKSPACE": handle_delete_workspace,
 }
 
 
