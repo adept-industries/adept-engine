@@ -6,17 +6,27 @@ from sqlalchemy import URL
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(case_sensitive=False, extra="ignore")
+    model_config = SettingsConfigDict(
+        case_sensitive=False,
+        extra="ignore",
+        env_file=("../.env", ".env"),
+        env_file_encoding="utf-8",
+    )
 
     postgres_host: str = "localhost"
     postgres_port: int = Field(default=5432, ge=1, le=65535)
     postgres_db: str = "adept"
     postgres_user: str = "adept"
-    postgres_password: SecretStr
+    postgres_password: SecretStr = SecretStr("change_me_local_only")
 
     engine_poll_interval_ms: int = Field(default=1000, ge=100, le=60_000)
     engine_worker_id: str = Field(default="local-worker-1", min_length=1, max_length=128)
     engine_max_job_attempts: int = Field(default=8, ge=1, le=100)
+
+    risk_model_dir: str = Field(default="model_artifacts")
+    stale_pr_hours_threshold: int = Field(default=120, ge=1)
+    outcome_observation_window_days: int = Field(default=14, ge=1)
+    app_internal_engine_token: str = Field(default="")
 
     @property
     def database_url(self) -> URL:
@@ -32,4 +42,4 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()  # type: ignore[call-arg]
+    return Settings()
