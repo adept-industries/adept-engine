@@ -179,6 +179,8 @@ def main() -> None:
     subparsers.add_parser("train-demo", help="Generate demo data and train model")
     subparsers.add_parser("demo", help="Run full end-to-end demo")
     subparsers.add_parser("demo-predict", help="Run sample prediction with SHAP explanation")
+    subparsers.add_parser("safe", help="Simulate a Safe Pull Request prediction")
+    subparsers.add_parser("risky", help="Simulate a Risky Pull Request prediction")
 
     args = parser.parse_args()
 
@@ -186,6 +188,76 @@ def main() -> None:
         run_train_demo()
     elif args.command == "demo":
         run_demo()
+    elif args.command == "safe":
+        if not risk_model.load():
+            run_train_demo()
+            risk_model.load()
+        safe_features = {
+            "lines_added": 12,
+            "lines_deleted": 2,
+            "files_changed": 1,
+            "commit_count": 1,
+            "source_files_changed": 0,
+            "test_files_changed": 1,
+            "dependency_files_changed": 0,
+            "hotspot_score": 0.05,
+            "recent_file_bugfix_rate": 0.02,
+            "recent_file_change_rate": 0.05,
+            "author_file_familiarity": 0.95,
+            "author_repo_experience": 0.90,
+            "ci_failures": 0,
+            "changes_requested": 0,
+            "review_comment_count": 1,
+            "review_rounds": 1,
+        }
+        res = risk_model.predict(safe_features)
+        print("========================================")
+        print("           SAFE PR PREDICTION           ")
+        print("========================================")
+        print(f"Risk Probability : {res['probability'] * 100:.1f}%")
+        print(f"Risk Level       : {res['risk_level']}")
+        print("Top Contributing SHAP Factors:")
+        for f in res["top_factors"]:
+            sym = "▲ Raises" if f["direction"] == "raises_risk" else "▼ Lowers"
+            print(
+                f"  {sym} Risk: {f['feature']} (val={f['value']}) | SHAP impact: {f['impact']:+.4f}"
+            )
+        print("========================================")
+    elif args.command == "risky":
+        if not risk_model.load():
+            run_train_demo()
+            risk_model.load()
+        risky_features = {
+            "lines_added": 950,
+            "lines_deleted": 480,
+            "files_changed": 25,
+            "commit_count": 8,
+            "source_files_changed": 20,
+            "test_files_changed": 2,
+            "dependency_files_changed": 3,
+            "hotspot_score": 0.85,
+            "recent_file_bugfix_rate": 0.45,
+            "recent_file_change_rate": 0.75,
+            "author_file_familiarity": 0.05,
+            "author_repo_experience": 0.10,
+            "ci_failures": 2,
+            "changes_requested": 1,
+            "review_comment_count": 18,
+            "review_rounds": 3,
+        }
+        res = risk_model.predict(risky_features)
+        print("========================================")
+        print("          RISKY PR PREDICTION           ")
+        print("========================================")
+        print(f"Risk Probability : {res['probability'] * 100:.1f}%")
+        print(f"Risk Level       : {res['risk_level']}")
+        print("Top Contributing SHAP Factors:")
+        for f in res["top_factors"]:
+            sym = "▲ Raises" if f["direction"] == "raises_risk" else "▼ Lowers"
+            print(
+                f"  {sym} Risk: {f['feature']} (val={f['value']}) | SHAP impact: {f['impact']:+.4f}"
+            )
+        print("========================================")
     elif args.command == "demo-predict":
         if not risk_model.load():
             run_train_demo()
@@ -209,7 +281,7 @@ def main() -> None:
             "review_rounds": 1,
         }
         res = risk_model.predict(sample_pr_features)
-        print(json.dumps(res, indent=2))
+        print(json.dumps(res, indent=2, default=str))
     else:
         # Default to running demo
         run_demo()

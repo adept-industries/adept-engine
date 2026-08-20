@@ -32,8 +32,16 @@ class RiskModelService:
         meta_path = self.artifact_dir / "risk_metadata.joblib"
 
         if not (model_path.exists() and cal_path.exists() and meta_path.exists()):
-            logger.info("risk_model_not_found_on_disk", dir=str(self.artifact_dir))
-            return False
+            logger.info("risk_model_not_found_auto_training_demo", dir=str(self.artifact_dir))
+            try:
+                from app.risk.synthetic import generate_synthetic_pr_dataset
+                from app.risk.trainer import train_risk_model
+
+                df = generate_synthetic_pr_dataset(n_samples=5000, seed=42)
+                train_risk_model(df, artifact_dir=self.artifact_dir, is_demo=True)
+            except Exception as exc:
+                logger.error("risk_model_auto_train_failed", error=str(exc))
+                return False
 
         try:
             self.model = joblib.load(model_path)
