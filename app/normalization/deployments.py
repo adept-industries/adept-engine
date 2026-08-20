@@ -51,7 +51,7 @@ def upsert_deployment_from_workflow_run(
     environment = workflow_run.get("name", "unknown")
     # A workflow run is treated as a production deployment only when the branch
     # matches the repository default branch.  This heuristic will be refined in
-    # Phase 7 when per-repository settings are read.
+    # Phase 6 when per-repository settings are read.
     repo = event_data.get("repository", {})
     default_branch = repo.get("default_branch", "main")
     head_branch = workflow_run.get("head_branch", "")
@@ -152,6 +152,11 @@ def _run_upsert(database_engine: Engine, row: dict[str, Any]) -> UUID:
             raw_data       = EXCLUDED.raw_data,
             updated_at     = now(),
             version        = deployments.version + 1
+        WHERE deployments.finished_at IS NULL
+           OR (
+               EXCLUDED.finished_at IS NOT NULL
+               AND EXCLUDED.finished_at >= deployments.finished_at
+           )
         RETURNING id
         """
     )
@@ -160,7 +165,22 @@ def _run_upsert(database_engine: Engine, row: dict[str, Any]) -> UUID:
     params["raw_data"] = json.dumps(params["raw_data"])
 
     with database_engine.begin() as connection:
-        deployment_id = connection.execute(sql, params).scalar_one()
+        deployment_id = connection.execute(sql, params).scalar_one_or_none()
+        if deployment_id is None:
+            # A delayed provider delivery can lose the monotonic update guard.
+            # The canonical row still exists, so return its stable identifier.
+            deployment_id = connection.execute(
+                text(
+                    """
+                    SELECT id
+                    FROM deployments
+                    WHERE repository_id = :repository_id
+                      AND source = :source
+                      AND external_deployment_id = :external_deployment_id
+                    """
+                ),
+                params,
+            ).scalar_one()
 
     return UUID(str(deployment_id))
 
