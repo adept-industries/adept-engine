@@ -6,7 +6,7 @@ import os
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -775,6 +775,16 @@ def test_jira_webhook_renewal_refreshes_and_requeues_five_days_before_expiry(
     monkeypatch.setattr(renew_jira_webhook, "JiraClient", FakeJiraClient)
     monkeypatch.setattr(
         renew_jira_webhook,
+        "load_jira_integration",
+        lambda engine, integration_id, workspace_id=None: (
+            loaded := provider_support.load_jira_integration(engine, integration_id, workspace_id),
+            replace(loaded, webhook_token_hash="a" * 64)
+            if not loaded.webhook_token_hash
+            else loaded,
+        )[1],
+    )
+    monkeypatch.setattr(
+        renew_jira_webhook,
         "get_valid_jira_access_token",
         lambda _engine, integration, _settings: ("access-token", integration),
     )
@@ -852,6 +862,16 @@ def test_jira_webhook_renewal_marks_missing_remote_webhook_for_reconnect(
             raise AssertionError("a missing webhook must not be refreshed")
 
     monkeypatch.setattr(renew_jira_webhook, "JiraClient", FakeJiraClient)
+    monkeypatch.setattr(
+        renew_jira_webhook,
+        "load_jira_integration",
+        lambda engine, integration_id, workspace_id=None: (
+            loaded := provider_support.load_jira_integration(engine, integration_id, workspace_id),
+            replace(loaded, webhook_token_hash="a" * 64)
+            if not loaded.webhook_token_hash
+            else loaded,
+        )[1],
+    )
     monkeypatch.setattr(
         renew_jira_webhook,
         "get_valid_jira_access_token",
