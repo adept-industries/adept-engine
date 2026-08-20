@@ -8,6 +8,17 @@ class JobOwnershipError(RuntimeError):
     pass
 
 
+class PermanentJobError(RuntimeError):
+    """Raised when retrying a job cannot make it succeed."""
+
+
+class RequeueWithPayloadError(Exception):
+    """Raised when a handler successfully processed a batch but needs to run again
+    with an updated payload cursor."""
+
+    pass
+
+
 def retry_delay_seconds(attempts: int, jitter_seconds: float | None = None) -> float:
     if attempts < 0:
         raise ValueError("attempts cannot be negative")
@@ -115,3 +126,46 @@ def mark_failed(
             {"job_id": job_id, "delay": delay, "error": safe_error},
         )
         return "FAILED"
+
+
+def requeue_with_payload(
+    database_engine: Engine,
+    job_id: UUID,
+    worker_id: str,
+    new_payload: dict,
+    delay_seconds: float = 0.0,
+) -> None:
+    """
+    Requeues a job with an updated payload without incrementing attempts or marking it as failed.
+    Used for paginated jobs to persist a cursor.
+    """
+    import json
+
+    with database_engine.begin() as connection:
+        result = connection.execute(
+            text(
+                """
+                UPDATE processing_jobs
+                SET status = 'PENDING',
+                    available_at = now() + make_interval(secs => :delay),
+                    locked_at = NULL,
+                    locked_by = NULL,
+                    payload = cast(:payload as jsonb),
+                    updated_at = now(),
+                    version = version + 1
+                WHERE id = :job_id
+                  AND status = 'RUNNING'
+                  AND locked_by = :worker_id
+                """
+            ),
+            {
+                "job_id": job_id,
+                "worker_id": worker_id,
+                "payload": json.dumps(new_payload),
+                "delay": delay_seconds,
+            },
+        )
+        if result.rowcount != 1:
+            raise JobOwnershipError("job is not owned by this worker")
+
+    raise RequeueWithPayloadError()
