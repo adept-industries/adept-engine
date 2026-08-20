@@ -130,4 +130,6 @@ def claim_jobs(
             stale_after_seconds=stale_after_seconds,
         )
 
-    return [ClaimedJob.from_row(row) for row in rows]
+    jobs = [ClaimedJob.from_row(row) for row in rows]
+    jobs.sort(key=lambda job: (job.priority, job.created_at, job.id))
+    return jobs
