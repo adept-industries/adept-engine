@@ -62,10 +62,29 @@ jobs:
         with:
           path: adept-engine
 
+      - name: Resolve API ref
+        id: api-ref
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          COMPANION_REF: ${{ github.head_ref }}
+        run: |
+          selected_ref="main"
+          if [ "$EVENT_NAME" = "pull_request" ] && [ -n "$COMPANION_REF" ]; then
+            if git ls-remote --exit-code \
+              https://github.com/adept-industries/adept-api.git \
+              "refs/heads/$COMPANION_REF" >/dev/null 2>&1; then
+              selected_ref="$COMPANION_REF"
+            fi
+          fi
+          echo "Using API ref: $selected_ref"
+          echo "ref=$selected_ref" >> "$GITHUB_OUTPUT"
+
       - name: Check out API migrations
         uses: actions/checkout@v6
         with:
           repository: adept-industries/adept-api
+          ref: ${{ steps.api-ref.outputs.ref }}
           path: adept-api
 
       - uses: actions/setup-java@v5
