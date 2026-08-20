@@ -29,6 +29,15 @@ class Settings(BaseSettings):
     outcome_observation_window_days: int = Field(default=14, ge=1)
     app_internal_engine_token: str = Field(default="")
 
+    github_app_id: str = ""
+    github_app_private_key_base64: SecretStr = SecretStr("")
+
+    jira_client_id: str = ""
+    jira_client_secret: SecretStr = SecretStr("")
+
+    app_integration_encryption_active_key_version: int = Field(default=1, ge=1)
+    app_integration_encryption_key_v1_base64: SecretStr = SecretStr("")
+
     @property
     def database_url(self) -> URL:
         return URL.create(

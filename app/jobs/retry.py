@@ -62,6 +62,7 @@ def mark_failed(
     *,
     permanent: bool = False,
     jitter_seconds: float | None = None,
+    retry_after_seconds: float | None = None,
 ) -> str:
     safe_error = sanitize_error(error)
 
@@ -108,6 +109,8 @@ def mark_failed(
             return "DEAD"
 
         delay = retry_delay_seconds(int(row["attempts"]), jitter_seconds)
+        if retry_after_seconds is not None:
+            delay = min(900.0, max(delay, max(0.0, retry_after_seconds)))
         connection.execute(
             text(
                 """
@@ -134,6 +137,8 @@ def requeue_with_payload(
     worker_id: str,
     new_payload: dict,
     delay_seconds: float = 0.0,
+    *,
+    reset_attempts: bool = False,
 ) -> None:
     """
     Requeues a job with an updated payload without incrementing attempts or marking it as failed.
@@ -147,6 +152,10 @@ def requeue_with_payload(
                 """
                 UPDATE processing_jobs
                 SET status = 'PENDING',
+                    attempts = CASE
+                        WHEN :reset_attempts THEN 0
+                        ELSE GREATEST(attempts - 1, 0)
+                    END,
                     available_at = now() + make_interval(secs => :delay),
                     locked_at = NULL,
                     locked_by = NULL,
@@ -163,6 +172,7 @@ def requeue_with_payload(
                 "worker_id": worker_id,
                 "payload": json.dumps(new_payload),
                 "delay": delay_seconds,
+                "reset_attempts": reset_attempts,
             },
         )
         if result.rowcount != 1:

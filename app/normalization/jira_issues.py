@@ -31,22 +31,24 @@ def upsert_jira_issue(
     """
     Idempotent upsert of a Jira issue.
     """
-    issue_id_str = str(issue_payload.get("id"))
+    issue_id_raw = issue_payload.get("id")
     issue_key = issue_payload.get("key")
 
-    if not issue_id_str or not issue_key:
+    if issue_id_raw is None or not str(issue_id_raw).strip() or not issue_key:
         logger.warning(
             "jira_issue_missing_identifiers",
             workspace_id=str(workspace_id),
             jira_project_id=str(jira_project_id),
         )
         return
+    issue_id_str = str(issue_id_raw)
 
-    fields = issue_payload.get("fields", {})
+    fields_value = issue_payload.get("fields")
+    fields: dict[str, Any] = fields_value if isinstance(fields_value, dict) else {}
 
-    issue_type = fields.get("issuetype", {}).get("name")
-    status_name = fields.get("status", {}).get("name")
-    priority_name = fields.get("priority", {}).get("name")
+    issue_type = _nested_name(fields.get("issuetype"))
+    status_name = _nested_name(fields.get("status"))
+    priority_name = _nested_name(fields.get("priority"))
     summary = fields.get("summary", "")
 
     # We will let the project mapping rules determine if it's an incident later,
@@ -113,6 +115,11 @@ def upsert_jira_issue(
                     raw_data = EXCLUDED.raw_data,
                     updated_at = now(),
                     version = jira_issues.version + 1
+                WHERE jira_issues.jira_updated_at IS NULL
+                   OR (
+                       EXCLUDED.jira_updated_at IS NOT NULL
+                       AND EXCLUDED.jira_updated_at >= jira_issues.jira_updated_at
+                   )
                 """
             ),
             {
@@ -138,3 +145,10 @@ def upsert_jira_issue(
             jira_project_id=str(jira_project_id),
             issue_key=issue_key,
         )
+
+
+def _nested_name(value: object) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    name = value.get("name")
+    return name if isinstance(name, str) and name else None

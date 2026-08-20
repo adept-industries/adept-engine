@@ -63,5 +63,5 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 addopts = "--strict-markers --cov=app --cov-report=term-missing"
 markers = [
-  "integration: requires PostgreSQL with a supported API Flyway V7, V8, V9, or V10 schema"
+  "integration: requires PostgreSQL with a supported API Flyway V7 through V12 schema"
 ]

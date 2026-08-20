@@ -10,6 +10,7 @@ from app.jobs.handlers.renew_jira_webhook import handle_renew_jira_webhook
 from app.jobs.handlers.sync_github_repositories import handle_sync_github_repositories
 from app.jobs.handlers.sync_jira_projects import handle_sync_jira_projects
 from app.jobs.retry import PermanentJobError, RequeueWithPayloadError, mark_failed, mark_succeeded
+from app.providers import ProviderError
 
 logger = structlog.get_logger()
 
@@ -58,6 +59,22 @@ def dispatch_job(database_engine: Engine, job: ClaimedJob, worker_id: str) -> No
             error=str(exc),
         )
         mark_failed(database_engine, job.id, worker_id, str(exc), permanent=True)
+        return
+    except ProviderError as exc:
+        logger.error(
+            "provider_job_execution_failed",
+            job_id=str(job.id),
+            job_type=job.job_type,
+            error=str(exc),
+            retry_after_seconds=exc.retry_after_seconds,
+        )
+        mark_failed(
+            database_engine,
+            job.id,
+            worker_id,
+            str(exc),
+            retry_after_seconds=exc.retry_after_seconds,
+        )
         return
     except Exception as exc:
         logger.error(

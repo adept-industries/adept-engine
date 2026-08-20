@@ -4,9 +4,9 @@ The engine is Adept's internal Python process and background-worker foundation.
 
 ## Current status
 
-Phase 1 provides Python 3.14, FastAPI health/readiness, SQLAlchemy access to the shared database, safe job-claim/retry primitives, tests, and a container image. The running worker intentionally remains idle until real handlers arrive in Phase 5.
+The Phase 5 worker implementation polls and claims durable jobs safely, recovers stale claims, applies bounded retries, dispatches provider synchronization/backfill/webhook work, performs idempotent normalization, and completes guarded workspace deletion. Unsupported or permanently invalid work becomes `DEAD` instead of retrying forever. Phase 5 acceptance remains pending until the coordinated API and engine verification suites pass.
 
-The API's Flyway migrations exclusively own the schema. The engine supports schema versions 7, 8, 9, 10, and 11 during the forward-compatible rollout and must not add Alembic or create tables.
+The API's Flyway migrations exclusively own the schema. The engine supports schema versions 7 through 12 during the forward-compatible rollout and must not add Alembic or create tables.
 
 ## Install
 
@@ -27,8 +27,14 @@ set +a
 uv run uvicorn app.main:app --reload --port 8000
 ```
 
+Run the worker in a separate terminal with the same environment:
+
+```bash
+uv run python -m app.worker
+```
+
 - `GET /health` checks only process liveness.
-- `GET /ready` requires PostgreSQL and a supported Flyway V7, V8, V9, V10, or V11 schema.
+- `GET /ready` requires PostgreSQL and a supported Flyway V7–V12 schema.
 
 ## Quality checks
 
@@ -39,12 +45,20 @@ uv run mypy app tests
 uv run pytest -m "not integration"
 ```
 
-Database integration tests require a disposable API-migrated database, `TEST_DATABASE_URL`, and `ENGINE_TEST_DATABASE_ALLOWED=true`.
+Database integration tests require a disposable API-migrated database. Never point this command at a development, staging, or production database:
+
+```bash
+ENGINE_TEST_DATABASE_ALLOWED=true \
+TEST_DATABASE_URL=postgresql+psycopg://adept:password@localhost:5432/adept_engine_test \
+uv run pytest -m integration
+```
+
+The engine CI database job provisions PostgreSQL, runs the real API Flyway migrations, and then executes this integration suite.
 
 ## Image
 
 ```bash
-docker build -t adept-engine:phase1 .
+docker build -t adept-engine:phase5 .
 ```
 
 After the complete `CI` workflow succeeds for a push to `main`, the publish

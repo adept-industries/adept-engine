@@ -87,6 +87,7 @@ def _build_row(
         "first_commit_at": None,  # enriched in Phase 6 when we fetch commits
         "closed_at": _parse_ts(closed_at_raw),
         "merged_at": _parse_ts(merged_at_raw),
+        "provider_updated_at": _parse_ts(pr.get("updated_at")),
         "raw_data": pr,
     }
 
@@ -111,7 +112,7 @@ def _run_upsert(database_engine: Engine, row: dict[str, Any]) -> UUID:
             :base_ref, :head_ref, :head_sha, :merge_commit_sha,
             :additions, :deletions, :changed_files, :commit_count,
             :opened_at, :first_commit_at, :closed_at, :merged_at,
-            now(), :raw_data, now(), 0
+            COALESCE(:provider_updated_at, now()), :raw_data, now(), 0
         )
         ON CONFLICT (repository_id, github_pr_id)
         DO UPDATE SET
@@ -131,6 +132,11 @@ def _run_upsert(database_engine: Engine, row: dict[str, Any]) -> UUID:
             raw_data          = EXCLUDED.raw_data,
             updated_at        = now(),
             version           = pull_requests.version + 1
+        WHERE pull_requests.last_synced_at IS NULL
+           OR (
+               EXCLUDED.last_synced_at IS NOT NULL
+               AND EXCLUDED.last_synced_at >= pull_requests.last_synced_at
+           )
         RETURNING id
         """
     )
@@ -142,7 +148,21 @@ def _run_upsert(database_engine: Engine, row: dict[str, Any]) -> UUID:
     params["raw_data"] = json.dumps(params["raw_data"])
 
     with database_engine.begin() as connection:
-        pr_id = connection.execute(sql, params).scalar_one()
+        pr_id = connection.execute(sql, params).scalar_one_or_none()
+        if pr_id is None:
+            # A stale delivery was intentionally ignored; callers still receive
+            # the stable canonical identifier for idempotent processing.
+            pr_id = connection.execute(
+                text(
+                    """
+                    SELECT id
+                    FROM pull_requests
+                    WHERE repository_id = :repository_id
+                      AND github_pr_id = :github_pr_id
+                    """
+                ),
+                params,
+            ).scalar_one()
 
     return UUID(str(pr_id))
 
