@@ -24,6 +24,45 @@ logger = structlog.get_logger()
 # ---------------------------------------------------------------------------
 
 
+import fnmatch
+from app.metrics.service import enqueue_recalculate_metrics_job, link_deployments_to_pull_requests
+
+
+def _get_repository_settings(database_engine: Engine, repository_id: UUID) -> dict[str, Any]:
+    with database_engine.connect() as connection:
+        row = connection.execute(
+            text("SELECT settings FROM repositories WHERE id = :repository_id"),
+            {"repository_id": str(repository_id)},
+        ).scalar_one_or_none()
+        if isinstance(row, dict):
+            return row
+        if isinstance(row, str):
+            try:
+                parsed = json.loads(row)
+                return parsed if isinstance(parsed, dict) else {}
+            except json.JSONDecodeError:
+                return {}
+    return {}
+
+
+def _is_branch_production(head_branch: str, default_branch: str, patterns_str: str | None) -> bool:
+    if not head_branch:
+        return False
+    if patterns_str and patterns_str.strip():
+        patterns = [p.strip() for p in patterns_str.split(",") if p.strip()]
+        return any(fnmatch.fnmatch(head_branch, p) for p in patterns)
+    return head_branch == default_branch
+
+
+def _is_env_production(environment: str, patterns_str: str | None) -> bool:
+    if not environment:
+        return False
+    if patterns_str and patterns_str.strip():
+        patterns = [p.strip() for p in patterns_str.split(",") if p.strip()]
+        return any(fnmatch.fnmatch(environment.lower(), p.lower()) for p in patterns)
+    return environment.lower() in ("production", "prod", "live")
+
+
 def upsert_deployment_from_workflow_run(
     database_engine: Engine,
     workspace_id: UUID,
@@ -49,13 +88,13 @@ def upsert_deployment_from_workflow_run(
 
     status = "SUCCESS" if conclusion == "success" else "FAILURE"
     environment = workflow_run.get("name", "unknown")
-    # A workflow run is treated as a production deployment only when the branch
-    # matches the repository default branch.  This heuristic will be refined in
-    # Phase 6 when per-repository settings are read.
+
+    settings = _get_repository_settings(database_engine, repository_id)
+    branch_patterns = settings.get("productionBranchPatterns")
     repo = event_data.get("repository", {})
     default_branch = repo.get("default_branch", "main")
     head_branch = workflow_run.get("head_branch", "")
-    is_production = head_branch == default_branch
+    is_production = _is_branch_production(head_branch, default_branch, branch_patterns)
 
     row = {
         "workspace_id": str(workspace_id),
@@ -73,7 +112,16 @@ def upsert_deployment_from_workflow_run(
         "raw_data": event_data,
     }
 
-    return _run_upsert(database_engine, row)
+    deployment_id = _run_upsert(database_engine, row)
+    if deployment_id and is_production:
+        try:
+            link_deployments_to_pull_requests(database_engine, repository_id)
+            with database_engine.begin() as conn:
+                enqueue_recalculate_metrics_job(conn, workspace_id, repository_id)
+        except Exception as exc:
+            logger.warning("metrics_recalculate_enqueue_failed", error=str(exc))
+
+    return deployment_id
 
 
 def upsert_deployment_from_deployment_status(
@@ -101,7 +149,10 @@ def upsert_deployment_from_deployment_status(
     deployment: dict[str, Any] = event_data.get("deployment", {})
     status = "SUCCESS" if gh_state == "success" else "FAILURE"
     environment = deployment.get("environment", "unknown")
-    is_production = environment.lower() in ("production", "prod")
+
+    settings = _get_repository_settings(database_engine, repository_id)
+    env_patterns = settings.get("productionEnvironmentPatterns")
+    is_production = _is_env_production(environment, env_patterns)
 
     row = {
         "workspace_id": str(workspace_id),
@@ -117,7 +168,16 @@ def upsert_deployment_from_deployment_status(
         "raw_data": event_data,
     }
 
-    return _run_upsert(database_engine, row)
+    deployment_id = _run_upsert(database_engine, row)
+    if deployment_id and is_production:
+        try:
+            link_deployments_to_pull_requests(database_engine, repository_id)
+            with database_engine.begin() as conn:
+                enqueue_recalculate_metrics_job(conn, workspace_id, repository_id)
+        except Exception as exc:
+            logger.warning("metrics_recalculate_enqueue_failed", error=str(exc))
+
+    return deployment_id
 
 
 # ---------------------------------------------------------------------------

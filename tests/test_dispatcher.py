@@ -37,6 +37,7 @@ def test_expected_phase_five_handlers_are_registered() -> None:
         "SYNC_JIRA_PROJECTS",
         "RENEW_JIRA_WEBHOOK",
         "DELETE_WORKSPACE",
+        "RECALCULATE_METRICS",
     }.issubset(HANDLERS)
 
 
