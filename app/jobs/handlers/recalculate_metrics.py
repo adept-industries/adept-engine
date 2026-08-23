@@ -28,8 +28,8 @@ def handle_recalculate_metrics(
     Recalculate DORA metrics for the target repository specified in the job payload.
     """
     payload = job.payload or {}
-    repo_id_str = payload.get("repository_id")
-    workspace_id_str = payload.get("workspace_id")
+    repo_id_str = payload.get("repository_id") or payload.get("repositoryId")
+    workspace_id_str = payload.get("workspace_id") or payload.get("workspaceId")
 
     if not repo_id_str or not workspace_id_str:
         raise PermanentJobError(
