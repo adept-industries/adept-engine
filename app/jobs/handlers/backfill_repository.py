@@ -14,6 +14,7 @@ from app.jobs.handlers.provider_support import (
     provider_exception_as_job_error,
 )
 from app.jobs.retry import PermanentJobError, requeue_with_payload
+from app.metrics.service import recalculate_repository_metrics
 from app.normalization.deployments import (
     upsert_deployment_from_deployment_status,
     upsert_deployment_from_workflow_run,
@@ -90,6 +91,18 @@ def handle_backfill_repository(database_engine: Engine, job: ClaimedJob, worker_
                 "backfillStartedAt": started_at.isoformat(),
             },
         )
+        return
+
+    try:
+        recalculate_repository_metrics(
+            database_engine,
+            repository.workspace_id,
+            repository.id,
+            from_date=cutoff,
+            to_date=started_at + timedelta(days=1),
+        )
+    except Exception as exc:
+        bound_logger.warning("backfill_metrics_recalculation_failed", error=str(exc))
 
     bound_logger.info("backfill_repository_completed", normalized_count=item_count)
 
