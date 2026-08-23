@@ -13,6 +13,7 @@ Covers:
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -117,7 +118,7 @@ def test_calculate_deployment_frequency_filters_correctly() -> None:
     p_start = datetime(2026, 8, 1, 0, 0, tzinfo=UTC)
     p_end = datetime(2026, 8, 8, 0, 0, tzinfo=UTC)
 
-    deployments = [
+    deployments: list[dict[str, Any]] = [
         # 1. Successful production in period -> COUNTS
         {
             "finished_at": datetime(2026, 8, 2, 12, 0, tzinfo=UTC),
@@ -182,7 +183,7 @@ def test_calculate_change_lead_time_computes_hours_and_percentiles() -> None:
     # PR 2: 6 hours lead time
     # PR 3: 20 hours lead time
     # Median = 6.0 hours, Mean = 10.0 hours
-    pr_deployments = [
+    pr_deployments: list[dict[str, Any]] = [
         {
             "deployment_finished_at": datetime(2026, 8, 2, 14, 0, tzinfo=UTC),
             "is_production": True,
@@ -230,7 +231,7 @@ def test_calculate_recovery_time() -> None:
 
     # Incident 1: 2.5 hours recovery
     # Incident 2: 4.5 hours recovery
-    incidents = [
+    incidents: list[dict[str, Any]] = [
         {
             "detected_at": datetime(2026, 8, 2, 10, 0, tzinfo=UTC),
             "resolved_at": datetime(2026, 8, 2, 12, 30, tzinfo=UTC),
@@ -269,7 +270,7 @@ def test_calculate_change_failure_rate_valid_percentage() -> None:
     p_end = datetime(2026, 8, 8, 0, 0, tzinfo=UTC)
 
     # 10 production deployments total, 2 failures -> 20.0%
-    deployments = [
+    deployments: list[dict[str, Any]] = [
         {
             "finished_at": datetime(2026, 8, 2, 10, 0, tzinfo=UTC),
             "is_production": True,
