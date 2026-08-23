@@ -9,6 +9,7 @@ Unique key: (repository_id, source, external_deployment_id)
 
 from __future__ import annotations
 
+import fnmatch
 import json
 from datetime import UTC, datetime
 from typing import Any
@@ -17,15 +18,13 @@ from uuid import UUID
 import structlog
 from sqlalchemy import Engine, text
 
+from app.metrics.service import enqueue_recalculate_metrics_job, link_deployments_to_pull_requests
+
 logger = structlog.get_logger()
 
 # ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
-
-
-import fnmatch
-from app.metrics.service import enqueue_recalculate_metrics_job, link_deployments_to_pull_requests
 
 
 def _get_repository_settings(database_engine: Engine, repository_id: UUID) -> dict[str, Any]:

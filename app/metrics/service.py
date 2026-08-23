@@ -16,7 +16,6 @@ import structlog
 from sqlalchemy import Engine, text
 
 from app.metrics.calculator import (
-    CALCULATION_VERSION,
     MetricSnapshotResult,
     calculate_change_failure_rate,
     calculate_change_lead_time,
@@ -40,7 +39,9 @@ def link_deployments_to_pull_requests(
         result = connection.execute(
             text(
                 """
-                INSERT INTO deployment_pull_requests (deployment_id, pull_request_id, link_method, created_at)
+                INSERT INTO deployment_pull_requests (
+                    deployment_id, pull_request_id, link_method, created_at
+                )
                 SELECT d.id, pr.id, 'MERGE_SHA', now()
                 FROM deployments d
                 JOIN pull_requests pr ON pr.repository_id = d.repository_id
@@ -78,18 +79,22 @@ def recalculate_repository_metrics(
 
     # 2. Fetch raw normalized data for the repository
     with database_engine.connect() as connection:
-        deployments_rows = connection.execute(
-            text(
-                """
-                SELECT id, is_production, status, finished_at, started_at, commit_sha
-                FROM deployments
-                WHERE repository_id = :repository_id
-                  AND finished_at IS NOT NULL
-                ORDER BY finished_at ASC
-                """
-            ),
-            {"repository_id": str(repository_id)},
-        ).mappings().all()
+        deployments_rows = (
+            connection.execute(
+                text(
+                    """
+                    SELECT id, is_production, status, finished_at, started_at, commit_sha
+                    FROM deployments
+                    WHERE repository_id = :repository_id
+                      AND finished_at IS NOT NULL
+                    ORDER BY finished_at ASC
+                    """
+                ),
+                {"repository_id": str(repository_id)},
+            )
+            .mappings()
+            .all()
+        )
 
         deployments: list[dict[str, Any]] = [
             {
@@ -103,21 +108,25 @@ def recalculate_repository_metrics(
             for row in deployments_rows
         ]
 
-        pr_dep_rows = connection.execute(
-            text(
-                """
-                SELECT d.id AS deployment_id, d.is_production, d.status AS deployment_status,
-                       d.finished_at AS deployment_finished_at,
-                       pr.id AS pr_id, pr.first_commit_at, pr.opened_at AS pr_opened_at
-                FROM deployments d
-                JOIN deployment_pull_requests dpr ON dpr.deployment_id = d.id
-                JOIN pull_requests pr ON pr.id = dpr.pull_request_id
-                WHERE d.repository_id = :repository_id
-                  AND d.finished_at IS NOT NULL
-                """
-            ),
-            {"repository_id": str(repository_id)},
-        ).mappings().all()
+        pr_dep_rows = (
+            connection.execute(
+                text(
+                    """
+                    SELECT d.id AS deployment_id, d.is_production, d.status AS deployment_status,
+                           d.finished_at AS deployment_finished_at,
+                           pr.id AS pr_id, pr.first_commit_at, pr.opened_at AS pr_opened_at
+                    FROM deployments d
+                    JOIN deployment_pull_requests dpr ON dpr.deployment_id = d.id
+                    JOIN pull_requests pr ON pr.id = dpr.pull_request_id
+                    WHERE d.repository_id = :repository_id
+                      AND d.finished_at IS NOT NULL
+                    """
+                ),
+                {"repository_id": str(repository_id)},
+            )
+            .mappings()
+            .all()
+        )
 
         pr_deployments: list[dict[str, Any]] = [
             {
@@ -132,21 +141,25 @@ def recalculate_repository_metrics(
             for row in pr_dep_rows
         ]
 
-        incident_rows = connection.execute(
-            text(
-                """
-                SELECT ji.id, ji.is_incident, ji.jira_created_at AS created_at,
-                       ji.jira_created_at AS detected_at, ji.resolved_at,
-                       NULL AS recovery_finished_at
-                FROM jira_issues ji
-                JOIN repository_jira_projects rjp ON rjp.jira_project_id = ji.jira_project_id
-                WHERE rjp.repository_id = :repository_id
-                  AND ji.is_incident = true
-                  AND ji.resolved_at IS NOT NULL
-                """
-            ),
-            {"repository_id": str(repository_id)},
-        ).mappings().all()
+        incident_rows = (
+            connection.execute(
+                text(
+                    """
+                    SELECT ji.id, ji.is_incident, ji.jira_created_at AS created_at,
+                           ji.jira_created_at AS detected_at, ji.resolved_at,
+                           NULL AS recovery_finished_at
+                    FROM jira_issues ji
+                    JOIN repository_jira_projects rjp ON rjp.jira_project_id = ji.jira_project_id
+                    WHERE rjp.repository_id = :repository_id
+                      AND ji.is_incident = true
+                      AND ji.resolved_at IS NOT NULL
+                    """
+                ),
+                {"repository_id": str(repository_id)},
+            )
+            .mappings()
+            .all()
+        )
 
         incidents: list[dict[str, Any]] = [
             {
@@ -215,7 +228,10 @@ def _upsert_snapshots(
             :period_start, :period_end, :value, :unit, :sample_size,
             :calculation_version, CAST(:dimensions AS jsonb), now(), now(), 0
         )
-        ON CONFLICT (repository_id, metric_type, granularity, period_start, period_end, calculation_version)
+        ON CONFLICT (
+            repository_id, metric_type, granularity,
+            period_start, period_end, calculation_version
+        )
         DO UPDATE SET
             value = EXCLUDED.value,
             unit = EXCLUDED.unit,

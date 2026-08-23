@@ -136,9 +136,13 @@ def calculate_deployment_frequency(
         is_prod = dep.get("is_production", False)
         status = dep.get("status")
 
-        if is_prod and status == "SUCCESS" and finished_at:
-            if period_start <= finished_at < period_end:
-                successful_count += 1
+        if (
+            is_prod
+            and status == "SUCCESS"
+            and finished_at
+            and period_start <= finished_at < period_end
+        ):
+            successful_count += 1
 
     return MetricSnapshotResult(
         metric_type="DEPLOYMENT_FREQUENCY",
@@ -162,7 +166,7 @@ def calculate_change_lead_time(
     """
     Calculate Change Lead Time in hours.
     For PRs linked to successful production deployments finishing in [period_start, period_end):
-    lead_time_hours = (deployment.finished_at - pull_request.first_commit_at).total_seconds() / 3600.0
+    lead_time_hours = (deployment.finished_at - pr.first_commit_at).total_seconds() / 3600.0
     """
     granularity_upper = granularity.upper()
     lead_time_hours_list: list[float] = []
@@ -173,11 +177,16 @@ def calculate_change_lead_time(
         status = item.get("deployment_status")
         commit_time = item.get("first_commit_at") or item.get("pr_opened_at")
 
-        if is_prod and status == "SUCCESS" and finished_at and commit_time:
-            if period_start <= finished_at < period_end:
-                lead_sec = (finished_at - commit_time).total_seconds()
-                if lead_sec >= 0:
-                    lead_time_hours_list.append(lead_sec / 3600.0)
+        if (
+            is_prod
+            and status == "SUCCESS"
+            and finished_at
+            and commit_time
+            and period_start <= finished_at < period_end
+        ):
+            lead_sec = (finished_at - commit_time).total_seconds()
+            if lead_sec >= 0:
+                lead_time_hours_list.append(lead_sec / 3600.0)
 
     sample_size = len(lead_time_hours_list)
     if sample_size == 0:
@@ -218,7 +227,7 @@ def calculate_recovery_time(
     """
     Calculate Failed Deployment Recovery Time (MTTR) in hours.
     For resolved incidents in [period_start, period_end):
-    recovery_hours = (coalesce(recovery_deployment.finished_at, incident.resolved_at) - incident.detected_at) / 3600.0
+    recovery_hours = (resolved_at - incident.detected_at).total_seconds() / 3600.0
     """
     granularity_upper = granularity.upper()
     recovery_hours_list: list[float] = []
@@ -227,11 +236,10 @@ def calculate_recovery_time(
         resolved_at = inc.get("recovery_finished_at") or inc.get("resolved_at")
         detected_at = inc.get("detected_at") or inc.get("created_at")
 
-        if resolved_at and detected_at:
-            if period_start <= resolved_at < period_end:
-                rec_sec = (resolved_at - detected_at).total_seconds()
-                if rec_sec >= 0:
-                    recovery_hours_list.append(rec_sec / 3600.0)
+        if resolved_at and detected_at and period_start <= resolved_at < period_end:
+            rec_sec = (resolved_at - detected_at).total_seconds()
+            if rec_sec >= 0:
+                recovery_hours_list.append(rec_sec / 3600.0)
 
     sample_size = len(recovery_hours_list)
     if sample_size == 0:
@@ -282,11 +290,10 @@ def calculate_change_failure_rate(
         is_prod = dep.get("is_production", False)
         status = dep.get("status")
 
-        if is_prod and finished_at:
-            if period_start <= finished_at < period_end:
-                total_prod += 1
-                if status == "FAILURE" or dep.get("has_incident", False):
-                    failed_prod += 1
+        if is_prod and finished_at and period_start <= finished_at < period_end:
+            total_prod += 1
+            if status == "FAILURE" or dep.get("has_incident", False):
+                failed_prod += 1
 
     if total_prod == 0:
         return MetricSnapshotResult(
