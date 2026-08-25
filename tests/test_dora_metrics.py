@@ -30,6 +30,7 @@ from app.metrics.calculator import (
     calculate_recovery_time,
     compute_percentiles,
     get_period_buckets,
+    get_recalculation_buckets,
 )
 
 # ---------------------------------------------------------------------------
@@ -98,6 +99,82 @@ def test_get_period_buckets_month() -> None:
         datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
         datetime(2026, 2, 1, 0, 0, tzinfo=UTC),
     )
+
+
+@pytest.mark.parametrize(
+    ("granularity", "timezone_name", "start", "end", "expected_first"),
+    [
+        (
+            "DAY",
+            "Asia/Colombo",
+            datetime(2026, 8, 1, 5, 0, tzinfo=UTC),
+            datetime(2026, 8, 2, 5, 0, tzinfo=UTC),
+            datetime(2026, 7, 31, 18, 30, tzinfo=UTC),
+        ),
+        (
+            "WEEK",
+            "Asia/Colombo",
+            datetime(2026, 8, 5, 0, 0, tzinfo=UTC),
+            datetime(2026, 8, 12, 0, 0, tzinfo=UTC),
+            datetime(2026, 8, 2, 18, 30, tzinfo=UTC),
+        ),
+        (
+            "MONTH",
+            "Asia/Colombo",
+            datetime(2026, 8, 5, 0, 0, tzinfo=UTC),
+            datetime(2026, 9, 5, 0, 0, tzinfo=UTC),
+            datetime(2026, 7, 31, 18, 30, tzinfo=UTC),
+        ),
+    ],
+)
+def test_period_buckets_use_workspace_calendar(
+    granularity: str,
+    timezone_name: str,
+    start: datetime,
+    end: datetime,
+    expected_first: datetime,
+) -> None:
+    assert get_period_buckets(start, end, granularity, timezone_name)[0][0] == expected_first
+
+
+def test_day_bucket_preserves_dst_calendar_boundary() -> None:
+    buckets = get_period_buckets(
+        datetime(2026, 3, 8, 6, 0, tzinfo=UTC),
+        datetime(2026, 3, 9, 6, 0, tzinfo=UTC),
+        "DAY",
+        "America/New_York",
+    )
+    assert buckets[0] == (
+        datetime(2026, 3, 8, 5, 0, tzinfo=UTC),
+        datetime(2026, 3, 9, 4, 0, tzinfo=UTC),
+    )
+
+
+@pytest.mark.parametrize(
+    ("granularity", "expected_starts"),
+    [
+        (
+            "DAY",
+            [datetime(2026, 8, 19, tzinfo=UTC), datetime(2026, 8, 20, tzinfo=UTC)],
+        ),
+        (
+            "WEEK",
+            [datetime(2026, 8, 10, tzinfo=UTC), datetime(2026, 8, 17, tzinfo=UTC)],
+        ),
+        (
+            "MONTH",
+            [datetime(2026, 7, 1, tzinfo=UTC), datetime(2026, 8, 1, tzinfo=UTC)],
+        ),
+    ],
+)
+def test_recalculation_selects_current_and_previous_period(
+    granularity: str,
+    expected_starts: list[datetime],
+) -> None:
+    affected_at = datetime(2026, 8, 20, 12, tzinfo=UTC)
+    buckets = get_recalculation_buckets(affected_at, affected_at, granularity)
+
+    assert [period_start for period_start, _period_end in buckets] == expected_starts
 
 
 def test_get_period_buckets_invalid_granularity() -> None:
@@ -172,7 +249,7 @@ def test_calculate_change_lead_time_zero_samples() -> None:
     assert res.metric_type == "CHANGE_LEAD_TIME_HOURS"
     assert res.value == 0.0
     assert res.sample_size == 0
-    assert res.dimensions == {}
+    assert res.dimensions == {"observations": []}
 
 
 def test_calculate_change_lead_time_computes_hours_and_percentiles() -> None:
@@ -218,6 +295,27 @@ def test_calculate_change_lead_time_computes_hours_and_percentiles() -> None:
     assert res.unit == "hours"
     assert res.dimensions["mean"] == 10.0
     assert res.dimensions["p50"] == 6.0
+    assert len(res.dimensions["observations"]) == 3
+
+
+def test_change_lead_time_excludes_missing_first_commit() -> None:
+    start = datetime(2026, 8, 1, tzinfo=UTC)
+    end = datetime(2026, 8, 2, tzinfo=UTC)
+    result = calculate_change_lead_time(
+        start,
+        end,
+        "DAY",
+        [
+            {
+                "deployment_finished_at": datetime(2026, 8, 1, 12, tzinfo=UTC),
+                "is_production": True,
+                "deployment_status": "SUCCESS",
+                "first_commit_at": None,
+                "pr_opened_at": datetime(2026, 8, 1, 10, tzinfo=UTC),
+            }
+        ],
+    )
+    assert result.sample_size == 0
 
 
 # ---------------------------------------------------------------------------

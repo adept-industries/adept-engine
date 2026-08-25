@@ -10,12 +10,12 @@ Implements standard DORA formulas:
 
 from __future__ import annotations
 
-import calendar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-CALCULATION_VERSION = "dora-v1"
+CALCULATION_VERSION = "dora-v2"
 
 
 @dataclass(frozen=True)
@@ -68,48 +68,93 @@ def get_period_buckets(
     from_date: datetime,
     to_date: datetime,
     granularity: str,
+    timezone_name: str = "UTC",
 ) -> list[tuple[datetime, datetime]]:
     """
-    Generate UTC period boundary tuples (start, end) covering [from_date, to_date).
+    Generate UTC instants for local workspace period boundaries covering
+    ``[from_date, to_date)``. Local calendar arithmetic preserves DST changes.
     Supported granularities: 'DAY', 'WEEK', 'MONTH'.
     """
     granularity = granularity.upper()
     if from_date >= to_date:
         return []
 
-    from_utc = from_date.astimezone(UTC)
+    try:
+        timezone = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(f"Unknown timezone: {timezone_name}") from exc
+
+    from_local = from_date.astimezone(timezone)
     to_utc = to_date.astimezone(UTC)
     buckets: list[tuple[datetime, datetime]] = []
 
     if granularity == "DAY":
-        current = datetime(from_utc.year, from_utc.month, from_utc.day, tzinfo=UTC)
-        while current < to_utc:
+        current = datetime(from_local.year, from_local.month, from_local.day, tzinfo=timezone)
+        while current.astimezone(UTC) < to_utc:
             next_day = current + timedelta(days=1)
-            buckets.append((current, next_day))
+            buckets.append((current.astimezone(UTC), next_day.astimezone(UTC)))
             current = next_day
 
     elif granularity == "WEEK":
-        # Align to Monday 00:00:00 UTC
-        monday = from_utc - timedelta(days=from_utc.weekday())
-        current = datetime(monday.year, monday.month, monday.day, tzinfo=UTC)
-        while current < to_utc:
+        monday = from_local - timedelta(days=from_local.weekday())
+        current = datetime(monday.year, monday.month, monday.day, tzinfo=timezone)
+        while current.astimezone(UTC) < to_utc:
             next_monday = current + timedelta(days=7)
-            buckets.append((current, next_monday))
+            buckets.append((current.astimezone(UTC), next_monday.astimezone(UTC)))
             current = next_monday
 
     elif granularity == "MONTH":
-        # Align to 1st of month 00:00:00 UTC
-        current = datetime(from_utc.year, from_utc.month, 1, tzinfo=UTC)
-        while current < to_utc:
-            _, days_in_month = calendar.monthrange(current.year, current.month)
-            next_month = current + timedelta(days=days_in_month)
-            buckets.append((current, next_month))
+        current = datetime(from_local.year, from_local.month, 1, tzinfo=timezone)
+        while current.astimezone(UTC) < to_utc:
+            if current.month == 12:
+                next_month = datetime(current.year + 1, 1, 1, tzinfo=timezone)
+            else:
+                next_month = datetime(current.year, current.month + 1, 1, tzinfo=timezone)
+            buckets.append((current.astimezone(UTC), next_month.astimezone(UTC)))
             current = next_month
 
     else:
         raise ValueError(f"Unsupported granularity: {granularity}")
 
     return buckets
+
+
+def get_recalculation_buckets(
+    affected_from: datetime,
+    affected_to: datetime,
+    granularity: str,
+    timezone_name: str = "UTC",
+) -> list[tuple[datetime, datetime]]:
+    """Return affected calendar buckets plus the preceding bucket.
+
+    A deduplicated job can represent a burst of events. Every bucket spanning
+    that burst is recalculated, along with the bucket immediately before it so
+    boundary-sensitive metrics remain correct.
+    """
+    if affected_from > affected_to:
+        raise ValueError("affected_from must not be after affected_to")
+
+    granularity_upper = granularity.upper()
+    padding_days = {"DAY": 2, "WEEK": 14, "MONTH": 62}.get(granularity_upper)
+    if padding_days is None:
+        raise ValueError(f"Unsupported granularity: {granularity}")
+
+    candidates = get_period_buckets(
+        affected_from - timedelta(days=padding_days),
+        affected_to + timedelta(days=padding_days),
+        granularity_upper,
+        timezone_name,
+    )
+    affected_indexes = [
+        index
+        for index, (period_start, period_end) in enumerate(candidates)
+        if period_end > affected_from and period_start <= affected_to
+    ]
+    if not affected_indexes:
+        return []
+    first = max(0, affected_indexes[0] - 1)
+    last = affected_indexes[-1] + 1
+    return candidates[first:last]
 
 
 def calculate_deployment_frequency(
@@ -153,7 +198,20 @@ def calculate_deployment_frequency(
         unit=unit,
         sample_size=successful_count,
         calculation_version=CALCULATION_VERSION,
-        dimensions={},
+        dimensions={
+            "observations": [
+                {
+                    "key": str(dep.get("id", "")),
+                    "at": dep["finished_at"].isoformat(),
+                    "value": 1.0,
+                }
+                for dep in deployments
+                if dep.get("is_production", False)
+                and dep.get("status") == "SUCCESS"
+                and dep.get("finished_at")
+                and period_start <= dep["finished_at"] < period_end
+            ]
+        },
     )
 
 
@@ -169,13 +227,13 @@ def calculate_change_lead_time(
     lead_time_hours = (deployment.finished_at - pr.first_commit_at).total_seconds() / 3600.0
     """
     granularity_upper = granularity.upper()
-    lead_time_hours_list: list[float] = []
+    observations: list[dict[str, Any]] = []
 
     for item in pr_deployments:
         finished_at = item.get("deployment_finished_at")
         is_prod = item.get("is_production", False)
         status = item.get("deployment_status")
-        commit_time = item.get("first_commit_at") or item.get("pr_opened_at")
+        commit_time = item.get("first_commit_at")
 
         if (
             is_prod
@@ -186,8 +244,15 @@ def calculate_change_lead_time(
         ):
             lead_sec = (finished_at - commit_time).total_seconds()
             if lead_sec >= 0:
-                lead_time_hours_list.append(lead_sec / 3600.0)
+                observations.append(
+                    {
+                        "key": f"{item.get('deployment_id')}:{item.get('pr_id')}",
+                        "at": finished_at.isoformat(),
+                        "value": lead_sec / 3600.0,
+                    }
+                )
 
+    lead_time_hours_list = [float(observation["value"]) for observation in observations]
     sample_size = len(lead_time_hours_list)
     if sample_size == 0:
         return MetricSnapshotResult(
@@ -199,7 +264,7 @@ def calculate_change_lead_time(
             unit="hours",
             sample_size=0,
             calculation_version=CALCULATION_VERSION,
-            dimensions={},
+            dimensions={"observations": []},
         )
 
     percentiles = compute_percentiles(lead_time_hours_list)
@@ -214,7 +279,7 @@ def calculate_change_lead_time(
         unit="hours",
         sample_size=sample_size,
         calculation_version=CALCULATION_VERSION,
-        dimensions=percentiles,
+        dimensions={**percentiles, "observations": observations},
     )
 
 
@@ -230,7 +295,7 @@ def calculate_recovery_time(
     recovery_hours = (resolved_at - incident.detected_at).total_seconds() / 3600.0
     """
     granularity_upper = granularity.upper()
-    recovery_hours_list: list[float] = []
+    observations: list[dict[str, Any]] = []
 
     for inc in incidents:
         resolved_at = inc.get("recovery_finished_at") or inc.get("resolved_at")
@@ -239,8 +304,15 @@ def calculate_recovery_time(
         if resolved_at and detected_at and period_start <= resolved_at < period_end:
             rec_sec = (resolved_at - detected_at).total_seconds()
             if rec_sec >= 0:
-                recovery_hours_list.append(rec_sec / 3600.0)
+                observations.append(
+                    {
+                        "key": str(inc.get("id", "")),
+                        "at": resolved_at.isoformat(),
+                        "value": rec_sec / 3600.0,
+                    }
+                )
 
+    recovery_hours_list = [float(observation["value"]) for observation in observations]
     sample_size = len(recovery_hours_list)
     if sample_size == 0:
         return MetricSnapshotResult(
@@ -252,7 +324,7 @@ def calculate_recovery_time(
             unit="hours",
             sample_size=0,
             calculation_version=CALCULATION_VERSION,
-            dimensions={},
+            dimensions={"observations": []},
         )
 
     percentiles = compute_percentiles(recovery_hours_list)
@@ -267,7 +339,7 @@ def calculate_recovery_time(
         unit="hours",
         sample_size=sample_size,
         calculation_version=CALCULATION_VERSION,
-        dimensions=percentiles,
+        dimensions={**percentiles, "observations": observations},
     )
 
 
@@ -305,7 +377,11 @@ def calculate_change_failure_rate(
             unit="percent",
             sample_size=0,
             calculation_version=CALCULATION_VERSION,
-            dimensions={"total_deployments": 0, "failed_deployments": 0},
+            dimensions={
+                "total_deployments": 0,
+                "failed_deployments": 0,
+                "observations": [],
+            },
         )
 
     rate = (failed_prod / total_prod) * 100.0
@@ -321,5 +397,18 @@ def calculate_change_failure_rate(
         dimensions={
             "total_deployments": total_prod,
             "failed_deployments": failed_prod,
+            "observations": [
+                {
+                    "key": str(dep.get("id", "")),
+                    "at": dep["finished_at"].isoformat(),
+                    "value": 1.0
+                    if dep.get("status") == "FAILURE" or dep.get("has_incident", False)
+                    else 0.0,
+                }
+                for dep in deployments
+                if dep.get("is_production", False)
+                and dep.get("finished_at")
+                and period_start <= dep["finished_at"] < period_end
+            ],
         },
     )

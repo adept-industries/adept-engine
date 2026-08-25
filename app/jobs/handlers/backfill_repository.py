@@ -146,12 +146,18 @@ def _process_pull_request_page(
         if not isinstance(number, int):
             raise PermanentJobError("GitHub returned a pull request without a number")
         pull_request = client.get_pull_request(repository.owner_login, repository.name, number)
+        commits = client.list_pull_request_commits(
+            repository.owner_login,
+            repository.name,
+            number,
+        )
         upsert_pull_request(
             database_engine,
             repository.workspace_id,
             repository.id,
             pull_request,
             "closed",
+            commits,
         )
         count += 1
 

@@ -29,6 +29,7 @@ from app.jobs.handlers import (
     sync_jira_projects,
 )
 from app.jobs.retry import PermanentJobError
+from app.normalization import deployments as deployment_normalization
 from app.providers.crypto import encrypt_integration_secret
 from app.providers.github import ProviderPage
 from app.providers.jira import JiraOAuthTokens
@@ -244,6 +245,150 @@ def _raw_event(
             },
         )
     return raw_event_id
+
+
+def test_workflow_production_classification_requires_branch_and_workflow_patterns() -> None:
+    settings = {
+        "productionBranchPatterns": ["main", "release/*"],
+        "deploymentWorkflowNamePatterns": ["deploy-*"],
+        "doraExclusions": ["*preview*"],
+    }
+
+    assert deployment_normalization._is_production_workflow(
+        "deploy-production", "main", "main", settings
+    )
+    assert not deployment_normalization._is_production_workflow(
+        "unit-tests", "main", "main", settings
+    )
+    assert not deployment_normalization._is_production_workflow(
+        "deploy-production", "feature/example", "main", settings
+    )
+    assert not deployment_normalization._is_production_workflow(
+        "deploy-preview", "main", "main", settings
+    )
+
+
+@pytest.mark.integration
+def test_production_outcomes_drive_incidents_and_one_pending_recalculation(
+    database_engine: Engine,
+    provider_rows: ProviderRows,
+) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    with database_engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                UPDATE repositories
+                SET settings = CAST(:settings AS jsonb)
+                WHERE id = :repository_id
+                """
+            ),
+            {
+                "repository_id": provider_rows.repository_id,
+                "settings": json.dumps(
+                    {
+                        "productionBranchPatterns": ["main"],
+                        "deploymentWorkflowNamePatterns": ["deploy-*"],
+                        "doraExclusions": ["*preview*"],
+                    }
+                ),
+            },
+        )
+
+    def workflow(run_id: int, name: str, conclusion: str, finished_at: datetime) -> dict[str, Any]:
+        return {
+            "repository": {"default_branch": "main"},
+            "workflow_run": {
+                "id": run_id,
+                "name": name,
+                "conclusion": conclusion,
+                "head_branch": "main",
+                "head_sha": f"sha-{run_id}",
+                "run_started_at": (finished_at - timedelta(minutes=5)).isoformat(),
+                "updated_at": finished_at.isoformat(),
+            },
+        }
+
+    deployment_normalization.upsert_deployment_from_workflow_run(
+        database_engine,
+        provider_rows.workspace_id,
+        provider_rows.repository_id,
+        workflow(6001, "unit-tests", "success", now),
+    )
+    failed_event = workflow(6002, "deploy-production", "failure", now + timedelta(minutes=10))
+    failed_id = deployment_normalization.upsert_deployment_from_workflow_run(
+        database_engine,
+        provider_rows.workspace_id,
+        provider_rows.repository_id,
+        failed_event,
+    )
+    deployment_normalization.upsert_deployment_from_workflow_run(
+        database_engine,
+        provider_rows.workspace_id,
+        provider_rows.repository_id,
+        failed_event,
+    )
+    recovered_id = deployment_normalization.upsert_deployment_from_workflow_run(
+        database_engine,
+        provider_rows.workspace_id,
+        provider_rows.repository_id,
+        workflow(6003, "deploy-production", "success", now + timedelta(minutes=25)),
+    )
+
+    with database_engine.connect() as connection:
+        production_flags = connection.execute(
+            text(
+                """
+                SELECT external_deployment_id, is_production
+                FROM deployments
+                WHERE repository_id = :repository_id
+                ORDER BY external_deployment_id
+                """
+            ),
+            {"repository_id": provider_rows.repository_id},
+        ).all()
+        incident = (
+            connection.execute(
+                text(
+                    """
+                    SELECT status, failed_deployment_id, recovery_deployment_id, resolved_at
+                    FROM incidents
+                    WHERE repository_id = :repository_id AND source = 'GITHUB'
+                    """
+                ),
+                {"repository_id": provider_rows.repository_id},
+            )
+            .mappings()
+            .one()
+        )
+        pending_job = (
+            connection.execute(
+                text(
+                    """
+                    SELECT payload
+                    FROM processing_jobs
+                    WHERE repository_id = :repository_id
+                      AND job_type = 'RECALCULATE_METRICS'
+                      AND status = 'PENDING'
+                    """
+                ),
+                {"repository_id": provider_rows.repository_id},
+            )
+            .mappings()
+            .one()
+        )
+
+    assert production_flags == [("6001", False), ("6002", True), ("6003", True)]
+    assert incident["status"] == "RESOLVED"
+    assert incident["failed_deployment_id"] == failed_id
+    assert incident["recovery_deployment_id"] == recovered_id
+    assert incident["resolved_at"] == now + timedelta(minutes=25)
+    assert datetime.fromisoformat(pending_job["payload"]["affected_from"]) == now + timedelta(
+        minutes=10
+    )
+    assert datetime.fromisoformat(pending_job["payload"]["affected_to"]) == now + timedelta(
+        minutes=25
+    )
 
 
 @pytest.mark.integration
@@ -542,6 +687,21 @@ def test_repository_backfill_pages_without_spending_retry_attempts(
                 "changed_files": 3,
                 "commits": 2,
             }
+
+        def list_pull_request_commits(
+            self, _owner: str, _repository: str, number: int
+        ) -> list[dict[str, Any]]:
+            assert number == 4
+            return [
+                {
+                    "sha": "first123",
+                    "commit": {"author": {"date": (now - timedelta(days=2)).isoformat()}},
+                },
+                {
+                    "sha": "abc123",
+                    "commit": {"author": {"date": (now - timedelta(days=1)).isoformat()}},
+                },
+            ]
 
         def list_workflow_runs(
             self,

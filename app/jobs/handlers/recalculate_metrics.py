@@ -44,9 +44,13 @@ def handle_recalculate_metrics(
 
     from_date_str = payload.get("from_date")
     to_date_str = payload.get("to_date")
+    affected_from_str = payload.get("affected_from")
+    affected_to_str = payload.get("affected_to")
 
     from_date = datetime.fromisoformat(from_date_str) if from_date_str else None
     to_date = datetime.fromisoformat(to_date_str) if to_date_str else None
+    affected_from = datetime.fromisoformat(affected_from_str) if affected_from_str else None
+    affected_to = datetime.fromisoformat(affected_to_str) if affected_to_str else None
 
     logger.info(
         "recalculating_metrics_job_started",
@@ -62,6 +66,8 @@ def handle_recalculate_metrics(
         repository_id=repository_id,
         from_date=from_date,
         to_date=to_date,
+        affected_from=affected_from,
+        affected_to=affected_to,
     )
 
     logger.info(

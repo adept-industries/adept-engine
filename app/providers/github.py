@@ -93,6 +93,24 @@ class GithubClient:
     def get_pull_request(self, owner: str, repository: str, number: int) -> dict[str, Any]:
         return self._request_json("GET", f"/repos/{owner}/{repository}/pulls/{number}")
 
+    def list_pull_request_commits(
+        self, owner: str, repository: str, number: int
+    ) -> list[dict[str, Any]]:
+        """Return the complete, chronological commit membership for one pull request."""
+        commits: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            body = self._request_json(
+                "GET",
+                f"/repos/{owner}/{repository}/pulls/{number}/commits",
+                params={"page": page, "per_page": 100},
+            )
+            batch = _list_body(body)
+            commits.extend(batch)
+            if len(batch) < 100:
+                return commits
+            page += 1
+
     def list_workflow_runs(
         self,
         owner: str,

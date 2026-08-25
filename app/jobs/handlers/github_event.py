@@ -16,12 +16,14 @@ from uuid import UUID
 import structlog
 from sqlalchemy import Engine, text
 
+from app.core.config import get_settings
 from app.db.models import ClaimedJob
-from app.jobs.handlers.provider_support import parse_uuid
+from app.jobs.handlers.provider_support import load_github_repository, parse_uuid
 from app.jobs.handlers.sync_github_repositories import _upsert_repository
 from app.jobs.retry import PermanentJobError, sanitize_error
 from app.normalization import deployments as deployment_normalizer
 from app.normalization import pull_requests as pr_normalizer
+from app.providers.github import GithubClient
 
 logger = structlog.get_logger()
 
@@ -197,8 +199,23 @@ def _handle_pull_request(
     if not isinstance(pr_data, dict):
         bound_logger.warning("pull_request_payload_missing_pull_request_key")
         return
+    number = pr_data.get("number")
+    if not isinstance(number, int):
+        raise PermanentJobError("GitHub returned a pull request without a number")
+    repository = load_github_repository(database_engine, repository_id)
+    with GithubClient(get_settings(), repository.installation_id) as client:
+        commits = client.list_pull_request_commits(
+            repository.owner_login,
+            repository.name,
+            number,
+        )
     pr_id = pr_normalizer.upsert_pull_request(
-        database_engine, workspace_id, repository_id, pr_data, action
+        database_engine,
+        workspace_id,
+        repository_id,
+        pr_data,
+        action,
+        commits,
     )
     bound_logger.info("pull_request_upserted", pr_db_id=str(pr_id), action=action)
 

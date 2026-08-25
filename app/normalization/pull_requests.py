@@ -31,6 +31,7 @@ def upsert_pull_request(
     repository_id: UUID,
     pr_data: dict[str, Any],
     action: str | None = None,
+    commits: list[dict[str, Any]] | None = None,
 ) -> UUID:
     """
     Parse *pr_data* (the ``pull_request`` object from the GitHub event) and
@@ -38,8 +39,11 @@ def upsert_pull_request(
 
     Returns the database UUID of the upserted row.
     """
-    row = _build_row(workspace_id, repository_id, pr_data, action)
-    return _run_upsert(database_engine, row)
+    row = _build_row(workspace_id, repository_id, pr_data, action, commits)
+    pull_request_id = _run_upsert(database_engine, row)
+    if commits is not None:
+        _replace_commits(database_engine, pull_request_id, commits)
+    return pull_request_id
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +56,7 @@ def _build_row(
     repository_id: UUID,
     pr: dict[str, Any],
     action: str | None,
+    commits: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
     """Transform a raw GitHub PR dict into a flat dict matching the DB schema."""
     merged = pr.get("merged", False)
@@ -64,6 +69,12 @@ def _build_row(
         state = "CLOSED"
     else:
         state = "OPEN"
+
+    commit_times = [
+        timestamp
+        for commit in commits or []
+        if (timestamp := _commit_timestamp(commit)) is not None
+    ]
 
     return {
         "workspace_id": str(workspace_id),
@@ -84,7 +95,7 @@ def _build_row(
         "changed_files": int(pr.get("changed_files", 0)),
         "commit_count": int(pr.get("commits", 0)),
         "opened_at": _parse_ts(pr.get("created_at")),
-        "first_commit_at": None,  # enriched in Phase 6 when we fetch commits
+        "first_commit_at": min(commit_times) if commit_times else None,
         "closed_at": _parse_ts(closed_at_raw),
         "merged_at": _parse_ts(merged_at_raw),
         "provider_updated_at": _parse_ts(pr.get("updated_at")),
@@ -126,6 +137,7 @@ def _run_upsert(database_engine: Engine, row: dict[str, Any]) -> UUID:
             deletions         = EXCLUDED.deletions,
             changed_files     = EXCLUDED.changed_files,
             commit_count      = EXCLUDED.commit_count,
+            first_commit_at   = COALESCE(EXCLUDED.first_commit_at, pull_requests.first_commit_at),
             closed_at         = EXCLUDED.closed_at,
             merged_at         = EXCLUDED.merged_at,
             last_synced_at    = now(),
@@ -165,6 +177,54 @@ def _run_upsert(database_engine: Engine, row: dict[str, Any]) -> UUID:
             ).scalar_one()
 
     return UUID(str(pr_id))
+
+
+def _replace_commits(
+    database_engine: Engine,
+    pull_request_id: UUID,
+    commits: list[dict[str, Any]],
+) -> None:
+    rows = [
+        {
+            "pull_request_id": pull_request_id,
+            "commit_sha": str(commit.get("sha", "")),
+            "committed_at": committed_at,
+        }
+        for commit in commits
+        if str(commit.get("sha", "")).strip()
+        and (committed_at := _commit_timestamp(commit)) is not None
+    ]
+    with database_engine.begin() as connection:
+        connection.execute(
+            text("DELETE FROM pull_request_commits WHERE pull_request_id = :pull_request_id"),
+            {"pull_request_id": pull_request_id},
+        )
+        if rows:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO pull_request_commits (
+                        pull_request_id, commit_sha, committed_at
+                    ) VALUES (
+                        :pull_request_id, :commit_sha, :committed_at
+                    )
+                    ON CONFLICT (pull_request_id, commit_sha) DO UPDATE
+                    SET committed_at = EXCLUDED.committed_at
+                    """
+                ),
+                rows,
+            )
+
+
+def _commit_timestamp(commit: dict[str, Any]) -> datetime | None:
+    details = commit.get("commit")
+    if not isinstance(details, dict):
+        return None
+    author = details.get("author")
+    committer = details.get("committer")
+    author_date = author.get("date") if isinstance(author, dict) else None
+    committer_date = committer.get("date") if isinstance(committer, dict) else None
+    return _parse_ts(author_date or committer_date)
 
 
 # ---------------------------------------------------------------------------
