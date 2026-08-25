@@ -18,7 +18,11 @@ from uuid import UUID
 import structlog
 from sqlalchemy import Engine, text
 
-from app.metrics.service import enqueue_recalculate_metrics_job, link_deployments_to_pull_requests
+from app.metrics.service import (
+    enqueue_recalculate_metrics_job,
+    link_deployments_to_pull_requests,
+    update_github_incident_lifecycle,
+)
 
 logger = structlog.get_logger()
 
@@ -44,22 +48,49 @@ def _get_repository_settings(database_engine: Engine, repository_id: UUID) -> di
     return {}
 
 
-def _is_branch_production(head_branch: str, default_branch: str, patterns_str: str | None) -> bool:
-    if not head_branch:
-        return False
-    if patterns_str and patterns_str.strip():
-        patterns = [p.strip() for p in patterns_str.split(",") if p.strip()]
-        return any(fnmatch.fnmatch(head_branch, p) for p in patterns)
-    return head_branch == default_branch
+def _patterns(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [pattern.strip() for pattern in value.split(",") if pattern.strip()]
+    if isinstance(value, list):
+        return [str(pattern).strip() for pattern in value if str(pattern).strip()]
+    return []
 
 
-def _is_env_production(environment: str, patterns_str: str | None) -> bool:
-    if not environment:
+def _matches(value: str, configured_patterns: object, defaults: list[str]) -> bool:
+    if not value:
         return False
-    if patterns_str and patterns_str.strip():
-        patterns = [p.strip() for p in patterns_str.split(",") if p.strip()]
-        return any(fnmatch.fnmatch(environment.lower(), p.lower()) for p in patterns)
-    return environment.lower() in ("production", "prod", "live")
+    patterns = _patterns(configured_patterns) or defaults
+    lowered = value.lower()
+    return any(fnmatch.fnmatch(lowered, pattern.lower()) for pattern in patterns)
+
+
+def _is_excluded(signal_name: str, settings: dict[str, Any]) -> bool:
+    return (
+        _matches(signal_name, settings.get("doraExclusions"), [])
+        if _patterns(settings.get("doraExclusions"))
+        else False
+    )
+
+
+def _is_production_workflow(
+    workflow_name: str,
+    head_branch: str,
+    default_branch: str,
+    settings: dict[str, Any],
+) -> bool:
+    return (
+        _matches(
+            head_branch,
+            settings.get("productionBranchPatterns"),
+            [default_branch],
+        )
+        and _matches(
+            workflow_name,
+            settings.get("deploymentWorkflowNamePatterns"),
+            ["*deploy*", "*production*", "*release*"],
+        )
+        and not _is_excluded(workflow_name, settings)
+    )
 
 
 def upsert_deployment_from_workflow_run(
@@ -89,11 +120,15 @@ def upsert_deployment_from_workflow_run(
     environment = workflow_run.get("name", "unknown")
 
     settings = _get_repository_settings(database_engine, repository_id)
-    branch_patterns = settings.get("productionBranchPatterns")
     repo = event_data.get("repository", {})
     default_branch = repo.get("default_branch", "main")
     head_branch = workflow_run.get("head_branch", "")
-    is_production = _is_branch_production(head_branch, default_branch, branch_patterns)
+    is_production = _is_production_workflow(
+        environment,
+        head_branch,
+        default_branch,
+        settings,
+    )
 
     row = {
         "workspace_id": str(workspace_id),
@@ -113,12 +148,15 @@ def upsert_deployment_from_workflow_run(
 
     deployment_id = _run_upsert(database_engine, row)
     if deployment_id and is_production:
-        try:
-            link_deployments_to_pull_requests(database_engine, repository_id)
-            with database_engine.begin() as conn:
-                enqueue_recalculate_metrics_job(conn, workspace_id, repository_id)
-        except Exception as exc:
-            logger.warning("metrics_recalculate_enqueue_failed", error=str(exc))
+        link_deployments_to_pull_requests(database_engine, repository_id)
+        update_github_incident_lifecycle(database_engine, deployment_id)
+        with database_engine.begin() as conn:
+            enqueue_recalculate_metrics_job(
+                conn,
+                workspace_id,
+                repository_id,
+                affected_at=row["finished_at"],
+            )
 
     return deployment_id
 
@@ -150,8 +188,11 @@ def upsert_deployment_from_deployment_status(
     environment = deployment.get("environment", "unknown")
 
     settings = _get_repository_settings(database_engine, repository_id)
-    env_patterns = settings.get("productionEnvironmentPatterns")
-    is_production = _is_env_production(environment, env_patterns)
+    is_production = _matches(
+        environment,
+        settings.get("productionEnvironmentPatterns"),
+        ["production", "prod", "live"],
+    ) and not _is_excluded(environment, settings)
 
     row = {
         "workspace_id": str(workspace_id),
@@ -169,12 +210,15 @@ def upsert_deployment_from_deployment_status(
 
     deployment_id = _run_upsert(database_engine, row)
     if deployment_id and is_production:
-        try:
-            link_deployments_to_pull_requests(database_engine, repository_id)
-            with database_engine.begin() as conn:
-                enqueue_recalculate_metrics_job(conn, workspace_id, repository_id)
-        except Exception as exc:
-            logger.warning("metrics_recalculate_enqueue_failed", error=str(exc))
+        link_deployments_to_pull_requests(database_engine, repository_id)
+        update_github_incident_lifecycle(database_engine, deployment_id)
+        with database_engine.begin() as conn:
+            enqueue_recalculate_metrics_job(
+                conn,
+                workspace_id,
+                repository_id,
+                affected_at=row["finished_at"],
+            )
 
     return deployment_id
 

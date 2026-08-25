@@ -4,9 +4,9 @@ The engine is Adept's internal Python process and background-worker foundation.
 
 ## Current status
 
-The Phase 5 worker implementation polls and claims durable jobs safely, recovers stale claims, applies bounded retries, dispatches provider synchronization/backfill/webhook work, performs idempotent normalization, and completes guarded workspace deletion. Unsupported or permanently invalid work becomes `DEAD` instead of retrying forever. Phase 5 acceptance remains pending until the coordinated API and engine verification suites pass.
+The implementation through Phase 6 polls and claims durable jobs safely, recovers stale claims, applies bounded retries, dispatches provider synchronization/backfill/webhook work, performs idempotent normalization, completes guarded workspace deletion, and calculates versioned DORA snapshots. Production classification uses configured branch, workflow, and environment patterns; pull-request linkage uses exact SHAs, normalized commit membership, and a merge-window fallback. GitHub production failures and recoveries drive normalized incidents, while recalculation work is repository-deduplicated and limited to affected calendar periods plus their preceding periods.
 
-The API's Flyway migrations exclusively own the schema. The engine supports schema versions 7 through 12 during the forward-compatible rollout and must not add Alembic or create tables.
+The API's Flyway migrations exclusively own the schema. The engine supports schema versions 7 through 13 during the forward-compatible rollout and must not add Alembic or create tables.
 
 ## Install
 
@@ -34,7 +34,7 @@ uv run python -m app.worker
 ```
 
 - `GET /health` checks only process liveness.
-- `GET /ready` requires PostgreSQL and a supported Flyway V7–V12 schema.
+- `GET /ready` requires PostgreSQL and a supported Flyway V7–V13 schema.
 
 ## Quality checks
 
@@ -58,7 +58,7 @@ The engine CI database job provisions PostgreSQL, runs the real API Flyway migra
 ## Image
 
 ```bash
-docker build -t adept-engine:phase5 .
+docker build -t adept-engine:phase6 .
 ```
 
 After the complete `CI` workflow succeeds for a push to `main`, the publish
