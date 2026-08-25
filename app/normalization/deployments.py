@@ -93,6 +93,86 @@ def _is_production_workflow(
     )
 
 
+def reclassify_repository_deployments(
+    database_engine: Engine,
+    repository_id: UUID,
+) -> int:
+    """Reapply the repository's current signal and production patterns to stored rows."""
+    with database_engine.connect() as connection:
+        repository = (
+            connection.execute(
+                text(
+                    """
+                    SELECT default_branch, settings
+                    FROM repositories
+                    WHERE id = :repository_id
+                    """
+                ),
+                {"repository_id": repository_id},
+            )
+            .mappings()
+            .one()
+        )
+        rows = (
+            connection.execute(
+                text(
+                    """
+                    SELECT id, source, environment, raw_data, is_production
+                    FROM deployments
+                    WHERE repository_id = :repository_id
+                    """
+                ),
+                {"repository_id": repository_id},
+            )
+            .mappings()
+            .all()
+        )
+
+    settings = repository["settings"] if isinstance(repository["settings"], dict) else {}
+    selected_signal = str(settings.get("deploymentSignal", "WORKFLOW_RUN")).upper()
+    updates: list[dict[str, Any]] = []
+    for row in rows:
+        raw_data = row["raw_data"] if isinstance(row["raw_data"], dict) else {}
+        is_production = False
+        if selected_signal == "WORKFLOW_RUN" and row["source"] == "GITHUB_WORKFLOW":
+            workflow = raw_data.get("workflow_run")
+            workflow_data = workflow if isinstance(workflow, dict) else {}
+            is_production = _is_production_workflow(
+                str(workflow_data.get("name") or row["environment"] or ""),
+                str(workflow_data.get("head_branch") or ""),
+                str(repository["default_branch"]),
+                settings,
+            )
+        elif selected_signal == "DEPLOYMENT" and row["source"] == "GITHUB_DEPLOYMENT":
+            environment = str(row["environment"] or "")
+            is_production = _matches(
+                environment,
+                settings.get("productionEnvironmentPatterns"),
+                ["production", "prod", "live"],
+            ) and not _is_excluded(environment, settings)
+        elif row["source"] == "MANUAL":
+            is_production = bool(row["is_production"])
+
+        if is_production != bool(row["is_production"]):
+            updates.append({"deployment_id": row["id"], "is_production": is_production})
+
+    if updates:
+        with database_engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    UPDATE deployments
+                    SET is_production = :is_production,
+                        updated_at = now(),
+                        version = version + 1
+                    WHERE id = :deployment_id
+                    """
+                ),
+                updates,
+            )
+    return len(updates)
+
+
 def upsert_deployment_from_workflow_run(
     database_engine: Engine,
     workspace_id: UUID,

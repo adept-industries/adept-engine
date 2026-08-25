@@ -33,10 +33,26 @@ def link_deployments_to_pull_requests(
     repository_id: UUID,
 ) -> int:
     """
-    Link deployments by merge/head SHA, normalized PR commit membership, then a
-    documented merge-window fallback for squash/rebase histories.
+    Rebuild automatic deployment links by merge/head SHA, normalized PR commit
+    membership, then a bounded merge-window fallback for squash/rebase histories.
+
+    Manual links are preserved.  The first recorded successful production
+    deployment has no trustworthy lower boundary, so it receives exact links
+    only instead of absorbing every older merged pull request.
     """
     with database_engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                DELETE FROM deployment_pull_requests dpr
+                USING deployments d
+                WHERE dpr.deployment_id = d.id
+                  AND d.repository_id = :repository_id
+                  AND dpr.link_method <> 'MANUAL'
+                """
+            ),
+            {"repository_id": str(repository_id)},
+        )
         exact_result = connection.execute(
             text(
                 """
@@ -78,22 +94,26 @@ def link_deployments_to_pull_requests(
                 SELECT d.id, pr.id, 'MERGE_WINDOW', now()
                 FROM deployments d
                 JOIN repositories r ON r.id = d.repository_id
+                JOIN LATERAL (
+                    SELECT previous.finished_at
+                    FROM deployments previous
+                    WHERE previous.repository_id = d.repository_id
+                      AND previous.is_production = true
+                      AND previous.status = 'SUCCESS'
+                      AND previous.finished_at < d.finished_at
+                    ORDER BY previous.finished_at DESC, previous.id DESC
+                    LIMIT 1
+                ) previous_boundary ON true
                 JOIN pull_requests pr
                   ON pr.repository_id = d.repository_id
                  AND pr.state = 'MERGED'
-                 AND pr.base_ref = r.default_branch
-                 AND pr.merged_at <= d.finished_at
-                 AND pr.merged_at > COALESCE(
-                     (
-                         SELECT max(previous.finished_at)
-                         FROM deployments previous
-                         WHERE previous.repository_id = d.repository_id
-                           AND previous.is_production = true
-                           AND previous.status = 'SUCCESS'
-                           AND previous.finished_at < d.finished_at
-                     ),
-                     '-infinity'::timestamptz
+                 AND pr.base_ref = COALESCE(
+                     NULLIF(d.raw_data->'workflow_run'->>'head_branch', ''),
+                     NULLIF(d.raw_data->'deployment'->>'ref', ''),
+                     r.default_branch
                  )
+                 AND pr.merged_at <= d.finished_at
+                 AND pr.merged_at > previous_boundary.finished_at
                 WHERE d.repository_id = :repository_id
                   AND d.is_production = true
                   AND d.status = 'SUCCESS'
@@ -106,75 +126,114 @@ def link_deployments_to_pull_requests(
         return int(exact_result.rowcount or 0) + int(fallback_result.rowcount or 0)
 
 
-def update_github_incident_lifecycle(database_engine: Engine, deployment_id: UUID) -> None:
-    """Create/resolve normalized incidents from trustworthy production outcomes."""
+def earliest_linked_production_deployment(
+    database_engine: Engine,
+    pull_request_id: UUID,
+) -> datetime | None:
+    """Return the earliest successful production deployment linked to one PR."""
+    with database_engine.connect() as connection:
+        return connection.execute(
+            text(
+                """
+                SELECT min(d.finished_at)
+                FROM deployment_pull_requests dpr
+                JOIN deployments d ON d.id = dpr.deployment_id
+                WHERE dpr.pull_request_id = :pull_request_id
+                  AND d.is_production = true
+                  AND d.status = 'SUCCESS'
+                  AND d.finished_at IS NOT NULL
+                """
+            ),
+            {"pull_request_id": pull_request_id},
+        ).scalar_one()
+
+
+def reconcile_github_incidents(database_engine: Engine, repository_id: UUID) -> None:
+    """Derive GitHub failure incidents chronologically from normalized deployments."""
     with database_engine.begin() as connection:
-        deployment = (
-            connection.execute(
-                text(
-                    """
-                    SELECT id, workspace_id, repository_id, environment, status,
-                           is_production, finished_at
-                    FROM deployments
-                    WHERE id = :deployment_id
-                    """
-                ),
-                {"deployment_id": deployment_id},
-            )
-            .mappings()
-            .one()
+        connection.execute(
+            text(
+                """
+                DELETE FROM incidents i
+                WHERE i.repository_id = :repository_id
+                  AND i.source = 'GITHUB'
+                  AND (
+                      i.failed_deployment_id IS NULL
+                      OR NOT EXISTS (
+                          SELECT 1
+                          FROM deployments failed
+                          WHERE failed.id = i.failed_deployment_id
+                            AND failed.repository_id = :repository_id
+                            AND failed.is_production = true
+                            AND failed.status = 'FAILURE'
+                            AND failed.finished_at IS NOT NULL
+                      )
+                  )
+                """
+            ),
+            {"repository_id": repository_id},
         )
-        if not deployment["is_production"] or deployment["finished_at"] is None:
-            return
-        if deployment["status"] == "FAILURE":
-            connection.execute(
-                text(
-                    """
-                    INSERT INTO incidents (
-                        workspace_id, repository_id, source, title, status,
-                        failed_deployment_id, detected_at, updated_at, version
-                    ) VALUES (
-                        :workspace_id, :repository_id, 'GITHUB', :title, 'OPEN',
-                        :deployment_id, :detected_at, now(), 0
-                    )
-                    ON CONFLICT (failed_deployment_id) WHERE failed_deployment_id IS NOT NULL
-                    DO UPDATE SET
-                        detected_at = EXCLUDED.detected_at,
-                        title = EXCLUDED.title,
-                        updated_at = now(),
-                        version = incidents.version + 1
-                    """
-                ),
-                {
-                    "workspace_id": deployment["workspace_id"],
-                    "repository_id": deployment["repository_id"],
-                    "deployment_id": deployment_id,
-                    "detected_at": deployment["finished_at"],
-                    "title": f"Failed production deployment to {deployment['environment']}",
-                },
-            )
-        elif deployment["status"] == "SUCCESS":
-            connection.execute(
-                text(
-                    """
-                    UPDATE incidents
-                    SET status = 'RESOLVED',
-                        recovery_deployment_id = :deployment_id,
-                        resolved_at = :resolved_at,
-                        updated_at = now(),
-                        version = version + 1
-                    WHERE repository_id = :repository_id
-                      AND source = 'GITHUB'
-                      AND status = 'OPEN'
-                      AND detected_at <= :resolved_at
-                    """
-                ),
-                {
-                    "deployment_id": deployment_id,
-                    "repository_id": deployment["repository_id"],
-                    "resolved_at": deployment["finished_at"],
-                },
-            )
+        connection.execute(
+            text(
+                """
+                INSERT INTO incidents (
+                    workspace_id, repository_id, source, title, status,
+                    failed_deployment_id, recovery_deployment_id,
+                    detected_at, resolved_at, updated_at, version
+                )
+                SELECT failed.workspace_id,
+                       failed.repository_id,
+                       'GITHUB',
+                       'Failed production deployment to ' || failed.environment,
+                       CASE WHEN recovery.id IS NULL THEN 'OPEN' ELSE 'RESOLVED' END,
+                       failed.id,
+                       recovery.id,
+                       failed.finished_at,
+                       recovery.finished_at,
+                       now(),
+                       0
+                FROM deployments failed
+                LEFT JOIN LATERAL (
+                    SELECT successful.id, successful.finished_at
+                    FROM deployments successful
+                    WHERE successful.repository_id = failed.repository_id
+                      AND successful.is_production = true
+                      AND successful.status = 'SUCCESS'
+                      AND successful.finished_at > failed.finished_at
+                    ORDER BY successful.finished_at ASC, successful.id ASC
+                    LIMIT 1
+                ) recovery ON true
+                WHERE failed.repository_id = :repository_id
+                  AND failed.is_production = true
+                  AND failed.status = 'FAILURE'
+                  AND failed.finished_at IS NOT NULL
+                ON CONFLICT (failed_deployment_id)
+                    WHERE failed_deployment_id IS NOT NULL
+                DO UPDATE SET
+                    workspace_id = EXCLUDED.workspace_id,
+                    repository_id = EXCLUDED.repository_id,
+                    source = 'GITHUB',
+                    title = EXCLUDED.title,
+                    status = EXCLUDED.status,
+                    recovery_deployment_id = EXCLUDED.recovery_deployment_id,
+                    detected_at = EXCLUDED.detected_at,
+                    resolved_at = EXCLUDED.resolved_at,
+                    updated_at = now(),
+                    version = incidents.version + 1
+                """
+            ),
+            {"repository_id": repository_id},
+        )
+
+
+def update_github_incident_lifecycle(database_engine: Engine, deployment_id: UUID) -> None:
+    """Reconcile the deployment's repository without relying on delivery order."""
+    with database_engine.connect() as connection:
+        repository_id = connection.execute(
+            text("SELECT repository_id FROM deployments WHERE id = :deployment_id"),
+            {"deployment_id": deployment_id},
+        ).scalar_one()
+    reconcile_github_incidents(database_engine, UUID(str(repository_id)))
 
 
 def recalculate_repository_metrics(
@@ -190,8 +249,9 @@ def recalculate_repository_metrics(
     Recalculate and upsert DORA metric snapshots for a repository across DAY, WEEK, and MONTH.
     Defaults to the past 90 days up to tomorrow UTC.
     """
-    # 1. Link any new deployments to PRs
+    # 1. Rebuild derived links and incident history before calculating.
     link_deployments_to_pull_requests(database_engine, repository_id)
+    reconcile_github_incidents(database_engine, repository_id)
 
     now_utc = datetime.now(UTC)
     if to_date is None:

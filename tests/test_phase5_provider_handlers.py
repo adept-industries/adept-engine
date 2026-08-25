@@ -29,7 +29,9 @@ from app.jobs.handlers import (
     sync_jira_projects,
 )
 from app.jobs.retry import PermanentJobError
+from app.metrics.service import link_deployments_to_pull_requests
 from app.normalization import deployments as deployment_normalization
+from app.normalization import pull_requests as pull_request_normalization
 from app.providers.crypto import encrypt_integration_secret
 from app.providers.github import ProviderPage
 from app.providers.jira import JiraOAuthTokens
@@ -392,6 +394,159 @@ def test_production_outcomes_drive_incidents_and_one_pending_recalculation(
 
 
 @pytest.mark.integration
+def test_incident_reconciliation_is_chronological_when_events_arrive_out_of_order(
+    database_engine: Engine,
+    provider_rows: ProviderRows,
+) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+
+    def workflow(run_id: int, conclusion: str, finished_at: datetime) -> dict[str, Any]:
+        return {
+            "repository": {"default_branch": "main"},
+            "workflow_run": {
+                "id": run_id,
+                "name": "deploy-production",
+                "conclusion": conclusion,
+                "head_branch": "main",
+                "head_sha": f"sha-{run_id}",
+                "run_started_at": (finished_at - timedelta(minutes=5)).isoformat(),
+                "updated_at": finished_at.isoformat(),
+            },
+        }
+
+    recovery_id = deployment_normalization.upsert_deployment_from_workflow_run(
+        database_engine,
+        provider_rows.workspace_id,
+        provider_rows.repository_id,
+        workflow(6102, "success", now + timedelta(minutes=20)),
+    )
+    failed_id = deployment_normalization.upsert_deployment_from_workflow_run(
+        database_engine,
+        provider_rows.workspace_id,
+        provider_rows.repository_id,
+        workflow(6101, "failure", now),
+    )
+
+    with database_engine.connect() as connection:
+        incident = (
+            connection.execute(
+                text(
+                    """
+                    SELECT status, failed_deployment_id, recovery_deployment_id, resolved_at
+                    FROM incidents
+                    WHERE repository_id = :repository_id AND source = 'GITHUB'
+                    """
+                ),
+                {"repository_id": provider_rows.repository_id},
+            )
+            .mappings()
+            .one()
+        )
+
+    assert incident["status"] == "RESOLVED"
+    assert incident["failed_deployment_id"] == failed_id
+    assert incident["recovery_deployment_id"] == recovery_id
+    assert incident["resolved_at"] == now + timedelta(minutes=20)
+
+
+@pytest.mark.integration
+def test_deployment_link_rebuild_uses_exact_bootstrap_and_bounded_fallback(
+    database_engine: Engine,
+    provider_rows: ProviderRows,
+) -> None:
+    first_deployment_at = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=3)
+
+    def pull_request(
+        github_id: int,
+        number: int,
+        head_sha: str,
+        merged_at: datetime,
+    ) -> None:
+        pull_request_normalization.upsert_pull_request(
+            database_engine,
+            provider_rows.workspace_id,
+            provider_rows.repository_id,
+            {
+                "id": github_id,
+                "node_id": f"PR_{github_id}",
+                "number": number,
+                "title": f"PR {number}",
+                "state": "closed",
+                "merged": True,
+                "draft": False,
+                "user": {"login": "developer"},
+                "base": {"ref": "main"},
+                "head": {"ref": f"feature-{number}", "sha": head_sha},
+                "merge_commit_sha": f"merge-{number}",
+                "created_at": (merged_at - timedelta(hours=1)).isoformat(),
+                "updated_at": merged_at.isoformat(),
+                "closed_at": merged_at.isoformat(),
+                "merged_at": merged_at.isoformat(),
+                "additions": 1,
+                "deletions": 0,
+                "changed_files": 1,
+                "commits": 1,
+            },
+            "closed",
+            [
+                {
+                    "sha": head_sha,
+                    "commit": {"author": {"date": (merged_at - timedelta(hours=1)).isoformat()}},
+                }
+            ],
+        )
+
+    pull_request(6201, 1, "ancient-sha", first_deployment_at - timedelta(days=10))
+    pull_request(6202, 2, "bootstrap-sha", first_deployment_at - timedelta(minutes=30))
+    pull_request(6203, 3, "window-sha", first_deployment_at + timedelta(hours=1))
+
+    def workflow(run_id: int, head_sha: str, finished_at: datetime) -> dict[str, Any]:
+        return {
+            "repository": {"default_branch": "main"},
+            "workflow_run": {
+                "id": run_id,
+                "name": "deploy-production",
+                "conclusion": "success",
+                "head_branch": "main",
+                "head_sha": head_sha,
+                "run_started_at": (finished_at - timedelta(minutes=5)).isoformat(),
+                "updated_at": finished_at.isoformat(),
+            },
+        }
+
+    deployment_normalization.upsert_deployment_from_workflow_run(
+        database_engine,
+        provider_rows.workspace_id,
+        provider_rows.repository_id,
+        workflow(6201, "bootstrap-sha", first_deployment_at),
+    )
+    deployment_normalization.upsert_deployment_from_workflow_run(
+        database_engine,
+        provider_rows.workspace_id,
+        provider_rows.repository_id,
+        workflow(6202, "second-deployment-sha", first_deployment_at + timedelta(hours=2)),
+    )
+    link_deployments_to_pull_requests(database_engine, provider_rows.repository_id)
+
+    with database_engine.connect() as connection:
+        links = connection.execute(
+            text(
+                """
+                SELECT d.external_deployment_id, pr.number, dpr.link_method
+                FROM deployment_pull_requests dpr
+                JOIN deployments d ON d.id = dpr.deployment_id
+                JOIN pull_requests pr ON pr.id = dpr.pull_request_id
+                WHERE d.repository_id = :repository_id
+                ORDER BY d.external_deployment_id, pr.number
+                """
+            ),
+            {"repository_id": provider_rows.repository_id},
+        ).all()
+
+    assert links == [("6201", 2, "MERGE_SHA"), ("6202", 3, "MERGE_WINDOW")]
+
+
+@pytest.mark.integration
 def test_github_lifecycle_events_work_without_repository_id(
     database_engine: Engine,
     provider_rows: ProviderRows,
@@ -591,11 +746,20 @@ def test_github_repository_sync_is_idempotent_and_reconciles_catalog(
             return ProviderPage(
                 [
                     {
+                        "id": 9001,
+                        "name": "engine",
+                        "full_name": "adept-industries/engine",
+                        "owner": {"login": "adept-industries"},
+                        "default_branch": "main",
+                        "visibility": "PRIVATE",
+                        "archived": True,
+                    },
+                    {
                         "id": 9002,
                         "name": "catalogued",
                         "full_name": "other-owner/catalogued",
                         "private": False,
-                    }
+                    },
                 ],
                 None,
             )
@@ -627,7 +791,7 @@ def test_github_repository_sync_is_idempotent_and_reconciles_catalog(
             .all()
         )
     assert [row["github_repo_id"] for row in rows] == [9001, 9002]
-    assert rows[0]["archived"] is False
+    assert rows[0]["archived"] is True
     assert rows[0]["tracking_enabled"] is False
     assert rows[1]["owner_login"] == "other-owner"
 
@@ -709,13 +873,13 @@ def test_repository_backfill_pages_without_spending_retry_attempts(
             _repository: str,
             page: int,
             *,
-            branch: str,
+            branch: str | None,
             created_from: str,
             created_to: str,
             per_page: int = 50,
         ) -> ProviderPage[dict[str, Any]]:
             assert page == 1
-            assert branch == "main"
+            assert branch is None
             assert created_from
             assert created_to
             return ProviderPage(

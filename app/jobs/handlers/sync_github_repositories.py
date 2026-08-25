@@ -168,6 +168,10 @@ def _upsert_repository(
                 default_branch = EXCLUDED.default_branch,
                 visibility = EXCLUDED.visibility,
                 archived = EXCLUDED.archived,
+                tracking_enabled = CASE
+                    WHEN EXCLUDED.archived THEN false
+                    ELSE repositories.tracking_enabled
+                END,
                 last_synced_at = EXCLUDED.last_synced_at,
                 updated_at = now(),
                 version = repositories.version + 1

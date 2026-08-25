@@ -117,21 +117,23 @@ class GithubClient:
         repository: str,
         page: int,
         *,
-        branch: str,
+        branch: str | None,
         created_from: str,
         created_to: str,
         per_page: int = 50,
     ) -> ProviderPage[dict[str, Any]]:
+        params: dict[str, str | int] = {
+            "status": "completed",
+            "created": f"{created_from}..{created_to}",
+            "page": page,
+            "per_page": per_page,
+        }
+        if branch:
+            params["branch"] = branch
         body = self._request_json(
             "GET",
             f"/repos/{owner}/{repository}/actions/runs",
-            params={
-                "branch": branch,
-                "status": "completed",
-                "created": f"{created_from}..{created_to}",
-                "page": page,
-                "per_page": per_page,
-            },
+            params=params,
         )
         items = _mapping_list(body, "workflow_runs")
         total = int(body.get("total_count", len(items)))

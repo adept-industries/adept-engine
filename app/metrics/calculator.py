@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-CALCULATION_VERSION = "dora-v2"
+CALCULATION_VERSION = "dora-v3"
 
 
 @dataclass(frozen=True)

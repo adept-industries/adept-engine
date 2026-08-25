@@ -21,6 +21,11 @@ from app.db.models import ClaimedJob
 from app.jobs.handlers.provider_support import load_github_repository, parse_uuid
 from app.jobs.handlers.sync_github_repositories import _upsert_repository
 from app.jobs.retry import PermanentJobError, sanitize_error
+from app.metrics.service import (
+    earliest_linked_production_deployment,
+    enqueue_recalculate_metrics_job,
+    link_deployments_to_pull_requests,
+)
 from app.normalization import deployments as deployment_normalizer
 from app.normalization import pull_requests as pr_normalizer
 from app.providers.github import GithubClient
@@ -217,7 +222,31 @@ def _handle_pull_request(
         action,
         commits,
     )
+    if _pull_request_is_merged(database_engine, pr_id):
+        previous_affected_at = earliest_linked_production_deployment(database_engine, pr_id)
+        link_deployments_to_pull_requests(database_engine, repository_id)
+        current_affected_at = earliest_linked_production_deployment(database_engine, pr_id)
+        affected_candidates = [
+            value for value in (previous_affected_at, current_affected_at) if value is not None
+        ]
+        if affected_candidates:
+            with database_engine.begin() as connection:
+                enqueue_recalculate_metrics_job(
+                    connection,
+                    workspace_id,
+                    repository_id,
+                    affected_at=min(affected_candidates),
+                )
     bound_logger.info("pull_request_upserted", pr_db_id=str(pr_id), action=action)
+
+
+def _pull_request_is_merged(database_engine: Engine, pull_request_id: UUID) -> bool:
+    with database_engine.connect() as connection:
+        state = connection.execute(
+            text("SELECT state FROM pull_requests WHERE id = :pull_request_id"),
+            {"pull_request_id": pull_request_id},
+        ).scalar_one()
+    return str(state) == "MERGED"
 
 
 def _handle_workflow_run(
