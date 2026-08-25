@@ -68,6 +68,10 @@ workflow builds Linux AMD64 and pushes exactly one immutable image tag:
 ghcr.io/adept-industries/adept-engine:sha-<full-commit>
 ```
 
-Pull-request runs, failed CI runs, and non-main branches never publish. The
-workflow uses GitHub's short-lived `GITHUB_TOKEN`; it does not require a PAT or
-any application/AWS secret.
+Pull-request runs, failed CI runs, and non-main branches never publish. A
+serialized production job deploys that exact image to AWS Lightsail, waits for
+the engine API and worker checks, and only then reports a terminal GitHub
+Deployment status for the tested SHA and the `production` environment. The
+workflow uses GitHub's short-lived `GITHUB_TOKEN` for GHCR and Deployment API
+access plus the existing `LIGHTSAIL_HOST`, `LIGHTSAIL_USER`, and
+`LIGHTSAIL_SSH_KEY` secrets; no PAT is required.

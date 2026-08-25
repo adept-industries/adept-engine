@@ -32,6 +32,7 @@ class GithubRepositoryContext:
     name: str
     full_name: str
     default_branch: str
+    archived: bool
     tracking_enabled: bool
     settings: dict[str, Any]
     integration_status: str
@@ -104,7 +105,7 @@ def load_github_repository(database_engine: Engine, repository_id: UUID) -> Gith
                     """
                     SELECT r.id, r.workspace_id, r.github_integration_id,
                            r.owner_login, r.name, r.full_name, r.default_branch,
-                           r.tracking_enabled, r.settings,
+                           r.archived, r.tracking_enabled, r.settings,
                            gi.installation_id, gi.status AS integration_status
                     FROM repositories r
                     JOIN github_integrations gi ON gi.id = r.github_integration_id
@@ -128,6 +129,7 @@ def load_github_repository(database_engine: Engine, repository_id: UUID) -> Gith
         name=str(row["name"]),
         full_name=str(row["full_name"]),
         default_branch=str(row["default_branch"]),
+        archived=bool(row["archived"]),
         tracking_enabled=bool(row["tracking_enabled"]),
         settings=settings,
         integration_status=str(row["integration_status"]),

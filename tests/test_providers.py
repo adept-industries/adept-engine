@@ -95,6 +95,32 @@ def test_github_client_authenticates_and_pages_installation_repositories() -> No
     assert requests[1].url.params["page"] == "1"
 
 
+def test_github_workflow_backfill_can_query_all_branches() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/access_tokens"):
+            return httpx.Response(201, json={"token": "installation-token"})
+        return httpx.Response(200, json={"total_count": 0, "workflow_runs": []})
+
+    http_client = httpx.Client(
+        base_url="https://api.github.com", transport=httpx.MockTransport(handler)
+    )
+    with GithubClient(_github_settings(), 99, http_client=http_client) as client:
+        client.list_workflow_runs(
+            "adept-industries",
+            "adept-engine",
+            1,
+            branch=None,
+            created_from="2026-08-01T00:00:00Z",
+            created_to="2026-08-02T00:00:00Z",
+        )
+
+    assert requests[1].url.path == "/repos/adept-industries/adept-engine/actions/runs"
+    assert "branch" not in requests[1].url.params
+
+
 def test_github_rate_limit_preserves_bounded_retry_after() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/access_tokens"):

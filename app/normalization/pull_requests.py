@@ -127,20 +127,24 @@ def _run_upsert(database_engine: Engine, row: dict[str, Any]) -> UUID:
         )
         ON CONFLICT (repository_id, github_pr_id)
         DO UPDATE SET
+            github_node_id    = EXCLUDED.github_node_id,
+            number            = EXCLUDED.number,
             title             = EXCLUDED.title,
             state             = EXCLUDED.state,
             draft             = EXCLUDED.draft,
             author_login      = EXCLUDED.author_login,
+            base_ref          = EXCLUDED.base_ref,
+            head_ref          = EXCLUDED.head_ref,
             head_sha          = EXCLUDED.head_sha,
             merge_commit_sha  = EXCLUDED.merge_commit_sha,
             additions         = EXCLUDED.additions,
             deletions         = EXCLUDED.deletions,
             changed_files     = EXCLUDED.changed_files,
             commit_count      = EXCLUDED.commit_count,
-            first_commit_at   = COALESCE(EXCLUDED.first_commit_at, pull_requests.first_commit_at),
+            first_commit_at   = EXCLUDED.first_commit_at,
             closed_at         = EXCLUDED.closed_at,
             merged_at         = EXCLUDED.merged_at,
-            last_synced_at    = now(),
+            last_synced_at    = EXCLUDED.last_synced_at,
             raw_data          = EXCLUDED.raw_data,
             updated_at        = now(),
             version           = pull_requests.version + 1
@@ -214,6 +218,22 @@ def _replace_commits(
                 ),
                 rows,
             )
+        connection.execute(
+            text(
+                """
+                UPDATE pull_requests
+                SET first_commit_at = (
+                        SELECT min(committed_at)
+                        FROM pull_request_commits
+                        WHERE pull_request_id = :pull_request_id
+                    ),
+                    updated_at = now(),
+                    version = version + 1
+                WHERE id = :pull_request_id
+                """
+            ),
+            {"pull_request_id": pull_request_id},
+        )
 
 
 def _commit_timestamp(commit: dict[str, Any]) -> datetime | None:

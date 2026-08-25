@@ -16,6 +16,7 @@ from app.jobs.handlers.provider_support import (
 from app.jobs.retry import PermanentJobError, requeue_with_payload
 from app.metrics.service import recalculate_repository_metrics
 from app.normalization.deployments import (
+    reclassify_repository_deployments,
     upsert_deployment_from_deployment_status,
     upsert_deployment_from_workflow_run,
 )
@@ -39,11 +40,12 @@ def handle_backfill_repository(database_engine: Engine, job: ClaimedJob, worker_
 
     if repository.integration_status != "ACTIVE":
         raise PermanentJobError(f"GitHub integration is {repository.integration_status}")
-    if not repository.tracking_enabled:
+    if repository.archived or not repository.tracking_enabled:
         logger.info(
-            "backfill_repository_cancelled_tracking_disabled",
+            "backfill_repository_cancelled_ineligible",
             job_id=str(job.id),
             repository_id=str(repository_id),
+            archived=repository.archived,
         )
         return
 
@@ -93,16 +95,14 @@ def handle_backfill_repository(database_engine: Engine, job: ClaimedJob, worker_
         )
         return
 
-    try:
-        recalculate_repository_metrics(
-            database_engine,
-            repository.workspace_id,
-            repository.id,
-            from_date=cutoff,
-            to_date=started_at + timedelta(days=1),
-        )
-    except Exception as exc:
-        bound_logger.warning("backfill_metrics_recalculation_failed", error=str(exc))
+    reclassify_repository_deployments(database_engine, repository.id)
+    recalculate_repository_metrics(
+        database_engine,
+        repository.workspace_id,
+        repository.id,
+        from_date=cutoff,
+        to_date=started_at + timedelta(days=1),
+    )
 
     bound_logger.info("backfill_repository_completed", normalized_count=item_count)
 
@@ -199,7 +199,7 @@ def _process_workflow_run_page(
         repository.owner_login,
         repository.name,
         page,
-        branch=repository.default_branch,
+        branch=None,
         created_from=window_start.isoformat(),
         created_to=window_end.isoformat(),
     )
