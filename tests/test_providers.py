@@ -1,14 +1,15 @@
 import base64
+import json
 
 import httpx
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from pydantic import SecretStr
 
 from app.core.config import Settings
 from app.providers import ProviderError, ProviderPermanentError
-from app.providers.github import GithubClient
+from app.providers.github import GithubClient, _generate_app_jwt
 from app.providers.jira import JiraClient, refresh_oauth_token
 
 
@@ -28,6 +29,41 @@ def _github_settings() -> Settings:
     return _settings(
         github_app_id="1234",
         github_app_private_key_base64=SecretStr(base64.b64encode(pem).decode()),
+    )
+
+
+def test_github_app_jwt_contains_signed_header_payload_and_signature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = private_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    settings = _settings(
+        github_app_id="1234",
+        github_app_private_key_base64=SecretStr(base64.b64encode(pem).decode()),
+    )
+    monkeypatch.setattr("app.providers.github.time.time", lambda: 1_800_000_000.0)
+
+    token = _generate_app_jwt(settings)
+    header_segment, payload_segment, signature_segment = token.split(".")
+
+    def decode_segment(segment: str) -> bytes:
+        return base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4))
+
+    assert json.loads(decode_segment(header_segment)) == {"alg": "RS256", "typ": "JWT"}
+    assert json.loads(decode_segment(payload_segment)) == {
+        "iat": 1_799_999_940,
+        "exp": 1_800_000_540,
+        "iss": "1234",
+    }
+    private_key.public_key().verify(
+        decode_segment(signature_segment),
+        f"{header_segment}.{payload_segment}".encode("ascii"),
+        padding.PKCS1v15(),
+        hashes.SHA256(),
     )
 
 

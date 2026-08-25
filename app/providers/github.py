@@ -231,7 +231,7 @@ def _generate_app_jwt(settings: Settings) -> str:
     payload = _base64url_json({"iat": now - 60, "exp": now + 540, "iss": app_id})
     signing_input = f"{header}.{payload}".encode("ascii")
     signature = private_key.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
-    return f"{header}.{_base64url(signature)}"
+    return f"{header}.{payload}.{_base64url(signature)}"
 
 
 def _base64url_json(value: dict[str, Any]) -> str:
