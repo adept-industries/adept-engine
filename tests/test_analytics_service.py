@@ -1,6 +1,7 @@
 """Unit tests for the tabular PR Risk Analytics microservice."""
 
 import sys
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -11,11 +12,11 @@ analytics_path = Path(__file__).resolve().parent.parent / "analytics-service"
 if str(analytics_path) not in sys.path:
     sys.path.insert(0, str(analytics_path))
 
-from main import app, compute_risk_level  # noqa: E402
+from main import app, compute_risk_level  # type: ignore[import-not-found] # noqa: E402
 
 
 @pytest.fixture(scope="module")
-def client():
+def client() -> Generator[TestClient]:
     with TestClient(app) as test_client:
         yield test_client
 
