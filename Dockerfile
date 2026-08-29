@@ -11,13 +11,14 @@ WORKDIR /app
 
 RUN addgroup --system adept \
     && adduser --system --home /home/adept --ingroup adept adept \
-    && mkdir -p /home/adept \
-    && chown -R adept:adept /home/adept
+    && mkdir -p /home/adept /app/model_artifacts \
+    && chown -R adept:adept /home/adept /app/model_artifacts
 
 COPY pyproject.toml uv.lock ./
 RUN uv sync --locked --no-dev --no-install-project
 
 COPY app app
+COPY analytics-service analytics-service
 
 USER adept
 

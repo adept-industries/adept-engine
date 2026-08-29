@@ -32,6 +32,12 @@ from app.risk.service import (
 )
 from app.risk.stale import check_stale
 from app.risk.synthetic import generate_synthetic_pr_dataset
+from app.risk.tabular import (
+    PredictResponse,
+    PRFeatures,
+    load_tabular_model,
+    predict_pr_risk,
+)
 from app.risk.trainer import train_risk_model
 
 configure_logging()
@@ -44,10 +50,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     loaded = risk_model.load()
     if not loaded:
         logger.info("risk_model_not_yet_loaded_at_startup")
+    load_tabular_model()
     yield
 
 
 app = FastAPI(title="Adept Engine", version="0.1.0", lifespan=lifespan)
+
+
+@app.post("/predict", response_model=PredictResponse)
+def predict_tabular(features: PRFeatures) -> PredictResponse:
+    """Inference entry point for real-time tabular Random Forest PR risk scoring."""
+    return predict_pr_risk(features)
 
 
 @app.get("/health")
