@@ -11,7 +11,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
-.coverage
+.coverage*
 coverage.xml
 htmlcov/
 
@@ -38,3 +38,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Old synthetic model artifacts
+model_artifacts/risk_*.joblib
