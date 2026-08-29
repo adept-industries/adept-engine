@@ -99,7 +99,7 @@ jobs:
             sudo docker compose --env-file .env.production -f compose.yaml ps
             ready=false
             for attempt in $(seq 1 60); do
-              if sudo docker compose --env-file .env.production -f compose.yaml exec -T engine-api python -c 'import json, urllib.request; payload = json.load(urllib.request.urlopen("http://localhost:8000/ready", timeout=3)); assert payload == {"status": "READY", "schemaVersion": "13"}, payload'; then
+              if sudo docker compose --env-file .env.production -f compose.yaml exec -T engine-api python -c 'import json, urllib.request; payload = json.load(urllib.request.urlopen("http://localhost:8000/ready", timeout=3)); assert payload.get("status") == "READY" and payload.get("schemaVersion") in {"13", "14"}, payload'; then
                 ready=true
                 break
               fi
