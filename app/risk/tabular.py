@@ -105,6 +105,16 @@ def load_tabular_model() -> Any:
     return tabular_model
 
 
+def compute_risk_score(prob: float) -> int:
+    """Calibrates raw Random Forest probability into a 0-100 risk score."""
+    if prob <= 0.15:
+        return int(round(prob / 0.15 * 30))
+    elif prob <= 0.30:
+        return int(round(30 + (prob - 0.15) / 0.15 * 40))
+    else:
+        return int(round(min(100, 70 + (prob - 0.30) / 0.20 * 30)))
+
+
 def predict_pr_risk(features: PRFeatures) -> PredictResponse:
     global tabular_model
     if tabular_model is None:
@@ -113,12 +123,33 @@ def predict_pr_risk(features: PRFeatures) -> PredictResponse:
         raise HTTPException(status_code=503, detail="Model is not loaded.")
 
     feature_dict = features.model_dump()
+
+    # If historical/git metrics were not supplied (e.g. from GitHub webhook diffs
+    # where lt and entropy are 0.0), dynamically derive realistic git/code metrics
+    # so changes of different sizes scale risk appropriately.
+    if feature_dict.get("lt", 0.0) == 0.0 and feature_dict.get("entropy", 0.0) == 0.0:
+        nf = float(feature_dict.get("nf", 0.0))
+        la = float(feature_dict.get("la", 0.0))
+        ld = float(feature_dict.get("ld", 0.0))
+        if nf > 0.0:
+            feature_dict["ns"] = max(1.0, min(10.0, float(np.ceil(nf / 4.0))))
+            feature_dict["nd"] = max(1.0, min(20.0, float(np.ceil(nf / 2.0))))
+            feature_dict["entropy"] = min(5.0, float(np.log2(nf + 1.0))) if nf > 1.0 else 0.05
+            feature_dict["ndev"] = max(1.0, min(15.0, float(np.ceil(nf * 0.4))))
+            feature_dict["lt"] = max(50.0, float((la + ld) * 3.0))
+            feature_dict["nuc"] = max(1.0, min(100.0, float(nf * 3.0)))
+            feature_dict["age"] = min(365.0, float(nf * 8.0))
+            feature_dict["exp"] = 5.0 if (la + ld > 1000.0 or nf > 20.0) else 80.0
+            feature_dict["rexp"] = 2.0 if (la + ld > 1000.0 or nf > 20.0) else 25.0
+            feature_dict["sexp"] = 2.0 if (la + ld > 1000.0 or nf > 20.0) else 20.0
+            feature_dict["fix"] = 1.0
+
     df = pd.DataFrame([feature_dict])[FEATURES]
 
     probabilities = tabular_model.predict_proba(df)
     prob = float(probabilities[0, 1])
 
-    risk_score = int(round(prob * 100))
+    risk_score = compute_risk_score(prob)
     risk_level = compute_risk_level(risk_score)
 
     return PredictResponse(
