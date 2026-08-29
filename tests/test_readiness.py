@@ -3,7 +3,11 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine, create_engine
 
 import app.main as main_module
-from app.db.session import current_schema_version
+from app.db.session import SUPPORTED_SCHEMA_VERSIONS, current_schema_version
+
+
+def test_supports_current_and_next_project_jira_schema_during_rollout() -> None:
+    assert {"13", "14"}.issubset(SUPPORTED_SCHEMA_VERSIONS)
 
 
 @pytest.mark.integration
