@@ -1,3 +1,2 @@
 *.csv
-*.joblib
 __pycache__/
