@@ -1,6 +1,5 @@
-import os
-import sys
 from pathlib import Path
+
 import pandas as pd
 
 FEATURES = [
@@ -30,9 +29,8 @@ def find_dataset_dir() -> Path:
     for c in candidates:
         if (c / "features_train.pkl").exists() and (c / "features_test.pkl").exists():
             return c
-    raise FileNotFoundError(
-        f"Could not locate JIT-Fine dataset in any expected location: {[str(c) for c in candidates]}"
-    )
+    locs = [str(c) for c in candidates]
+    raise FileNotFoundError(f"Could not locate JIT-Fine dataset in: {locs}")
 
 
 def parse_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:

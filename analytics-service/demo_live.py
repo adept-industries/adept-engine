@@ -6,9 +6,8 @@ Demonstrates live inference on Scenario A (Low Risk) and Scenario B (High Risk).
 
 import json
 import os
-import sys
-import urllib.request
 import urllib.error
+import urllib.request
 
 # Scenarios definition
 SCENARIOS = {
@@ -101,9 +100,9 @@ def predict_via_local_model(features):
 
 def render_ascii_toast(title, pr_title, score, level):
     color_codes = {
-        "LOW": "\033[92m",      # Green
-        "MEDIUM": "\033[93m",   # Yellow
-        "HIGH": "\033[91m",     # Red
+        "LOW": "\033[92m",  # Green
+        "MEDIUM": "\033[93m",  # Yellow
+        "HIGH": "\033[91m",  # Red
     }
     reset = "\033[0m"
     bold = "\033[1m"
@@ -113,26 +112,39 @@ def render_ascii_toast(title, pr_title, score, level):
     # Shorten pr_title if needed
     display_title = (pr_title[:45] + "...") if len(pr_title) > 48 else pr_title
 
+    header_line = (
+        f"  {bold}│{reset}  {color}●{reset} {bold}PR Risk Analysis Complete{reset}"
+        f"                            {dim}×{reset}   {bold}│{reset}"
+    )
+    score_line = (
+        f"  {bold}│{reset}  Risk Score: {bold}{score:>3}{reset} / 100"
+        f"               [{color}{bold}{level:^8}{reset}]   {bold}│{reset}"
+    )
     print(f"""
   {bold}┌────────────────────────────────────────────────────────┐{reset}
-  {bold}│{reset}  {color}●{reset} {bold}PR Risk Analysis Complete{reset}                            {dim}×{reset}   {bold}│{reset}
+{header_line}
   {bold}│{reset}  {dim}Based on code size and history.{reset}                       {bold}│{reset}
   {bold}│{reset}                                                        {bold}│{reset}
   {bold}│{reset}  {bold}PR:{reset} {display_title:<49}  {bold}│{reset}
   {bold}│{reset}  ──────────────────────────────────────────────────────  {bold}│{reset}
-  {bold}│{reset}  Risk Score: {bold}{score:>3}{reset} / 100               [{color}{bold}{level:^8}{reset}]   {bold}│{reset}
+{score_line}
   {bold}└────────────────────────────────────────────────────────┘{reset}
 """)
 
 
 def main():
     service_active = is_service_running()
-    mode = "FastAPI HTTP (http://localhost:8000/predict)" if service_active else "Local Scikit-Learn Model Fallback"
+    status_text = "ONLINE [200 OK]" if service_active else "OFFLINE (Using fallback)"
+    mode = (
+        "FastAPI HTTP (http://localhost:8000/predict)"
+        if service_active
+        else "Local Scikit-Learn Model Fallback"
+    )
 
     print("\n" + "=" * 65)
     print("      ADEPT PR RISK ANALYTICS - LIVE VERIFICATION")
     print("=" * 65)
-    print(f" Microservice Status : {'ONLINE [200 OK]' if service_active else 'OFFLINE (Using fallback)'}")
+    print(f" Microservice Status : {status_text}")
     print(f" Execution Mode      : {mode}")
     print("=" * 65)
 
@@ -148,10 +160,7 @@ def main():
             print(f"   - {k:<8}: {v:>7.2f}")
 
         # Predict
-        if service_active:
-            result = predict_via_api(features)
-        else:
-            result = predict_via_local_model(features)
+        result = predict_via_api(features) if service_active else predict_via_local_model(features)
 
         prob = result["probability"]
         score = result["riskScore"]

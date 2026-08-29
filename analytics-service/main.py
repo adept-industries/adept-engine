@@ -1,7 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import joblib
 import pandas as pd
@@ -44,10 +44,12 @@ def load_model():
         from sklearn.ensemble import RandomForestClassifier
 
         fallback = RandomForestClassifier(n_estimators=100, random_state=42)
-        X_dummy = np.array([
-            [15, 3, 1, 1, 1, 0.1, 5, 100, 2, 2, 120, 25, 15, 1],
-            [850, 320, 18, 6, 6, 0.9, 1, 15, 1, 120, 0, 0, 0, 0],
-        ])
+        X_dummy = np.array(
+            [
+                [15, 3, 1, 1, 1, 0.1, 5, 100, 2, 2, 120, 25, 15, 1],
+                [850, 320, 18, 6, 6, 0.9, 1, 15, 1, 120, 0, 0, 0, 0],
+            ]
+        )
         y_dummy = np.array([0, 1])
         fallback.fit(X_dummy, y_dummy)
         joblib.dump(fallback, MODEL_PATH)
@@ -106,7 +108,7 @@ def compute_risk_level(risk_score: int) -> str:
 
 
 @app.get("/health")
-def health() -> Dict[str, Any]:
+def health() -> dict[str, Any]:
     return {"status": "healthy", "model_loaded": model is not None}
 
 
