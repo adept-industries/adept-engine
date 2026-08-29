@@ -75,3 +75,5 @@ Deployment status for the tested SHA and the `production` environment. The
 workflow uses GitHub's short-lived `GITHUB_TOKEN` for GHCR and Deployment API
 access plus the existing `LIGHTSAIL_HOST`, `LIGHTSAIL_USER`, and
 `LIGHTSAIL_SSH_KEY` secrets; no PAT is required.
+
+<!-- mock PR to verify real-time PR risk evaluation in Adept dashboard -->
