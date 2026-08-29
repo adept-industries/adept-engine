@@ -94,3 +94,20 @@ def test_model_metadata_endpoint() -> None:
     assert "feature_names" in data
     assert "thresholds" in data
     assert data["is_demo"] is True
+
+
+def test_predict_tabular_endpoint() -> None:
+    client = TestClient(app)
+    payload = {
+        "la": 450.0,
+        "ld": 120.0,
+        "nf": 8.0,
+    }
+    response = client.post("/predict", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert "probability" in data
+    assert "riskScore" in data
+    assert "riskLevel" in data
+    assert 0 <= data["riskScore"] <= 100
+    assert data["riskLevel"] in ("LOW", "MEDIUM", "HIGH")
