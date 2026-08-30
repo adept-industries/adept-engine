@@ -22,9 +22,11 @@ from app.normalization.deployments import (
 )
 from app.normalization.pull_requests import upsert_pull_request
 from app.providers.github import GithubClient, ProviderPage
+from app.risk.service import calculate_and_persist_pull_request_risk
 
 logger = structlog.get_logger()
 
+OPEN_PULL_REQUEST_STAGE = "open_pull_requests"
 PULL_REQUEST_STAGE = "pull_requests"
 WORKFLOW_RUN_STAGE = "workflow_runs"
 DEPLOYMENT_STAGE = "deployments"
@@ -33,6 +35,7 @@ DEPLOYMENT_STAGE = "deployments"
 def handle_backfill_repository(database_engine: Engine, job: ClaimedJob, worker_id: str) -> None:
     repository_id = parse_uuid(job.payload.get("repositoryId"), "repositoryId")
     backfill_days = _bounded_days(job.payload.get("backfillDays", 90))
+    risk_only = job.payload.get("riskOnly") is True
     started_at = _started_at(job.payload.get("backfillStartedAt"))
     cutoff = started_at - timedelta(days=backfill_days)
     cursor = _cursor(job.payload.get("cursor"), cutoff, started_at)
@@ -70,6 +73,7 @@ def handle_backfill_repository(database_engine: Engine, job: ClaimedJob, worker_
                 cutoff,
                 started_at,
                 cursor,
+                risk_only,
             )
     except Exception as exc:
         converted = provider_exception_as_job_error(exc)
@@ -95,14 +99,15 @@ def handle_backfill_repository(database_engine: Engine, job: ClaimedJob, worker_
         )
         return
 
-    reclassify_repository_deployments(database_engine, repository.id)
-    recalculate_repository_metrics(
-        database_engine,
-        repository.workspace_id,
-        repository.id,
-        from_date=cutoff,
-        to_date=started_at + timedelta(days=1),
-    )
+    if not risk_only:
+        reclassify_repository_deployments(database_engine, repository.id)
+        recalculate_repository_metrics(
+            database_engine,
+            repository.workspace_id,
+            repository.id,
+            from_date=cutoff,
+            to_date=started_at + timedelta(days=1),
+        )
 
     bound_logger.info("backfill_repository_completed", normalized_count=item_count)
 
@@ -116,7 +121,18 @@ def _process_page(
     cutoff: datetime,
     started_at: datetime,
     cursor: dict[str, Any],
+    risk_only: bool,
 ) -> tuple[dict[str, Any] | None, int]:
+    if stage == OPEN_PULL_REQUEST_STAGE:
+        return _process_open_pull_request_page(
+            database_engine,
+            client,
+            repository,
+            page,
+            risk_only=risk_only,
+        )
+    if risk_only:
+        raise PermanentJobError("risk-only backfill cannot process non-risk stages")
     if stage == PULL_REQUEST_STAGE:
         return _process_pull_request_page(
             database_engine, client, repository, page, cutoff, started_at
@@ -126,6 +142,67 @@ def _process_page(
     if stage == DEPLOYMENT_STAGE:
         return _process_deployment_page(database_engine, client, repository, page, cutoff)
     raise PermanentJobError("Invalid backfill cursor stage")
+
+
+def _process_open_pull_request_page(
+    database_engine: Engine,
+    client: GithubClient,
+    repository: Any,
+    page: int,
+    *,
+    risk_only: bool,
+) -> tuple[dict[str, Any] | None, int]:
+    """Normalize and score every currently open PR, regardless of its age."""
+    result = client.list_open_pull_requests(repository.owner_login, repository.name, page)
+    count = 0
+    for summary in result.items:
+        number = summary.get("number")
+        if not isinstance(number, int):
+            raise PermanentJobError("GitHub returned a pull request without a number")
+        pull_request = client.get_pull_request(repository.owner_login, repository.name, number)
+        commits = client.list_pull_request_commits(
+            repository.owner_login,
+            repository.name,
+            number,
+        )
+        pull_request_id = upsert_pull_request(
+            database_engine,
+            repository.workspace_id,
+            repository.id,
+            pull_request,
+            "synchronize",
+            commits,
+        )
+        changed_files = _changed_files(pull_request)
+        if changed_files > 3_000:
+            logger.warning(
+                "backfill_pr_risk_skipped_github_file_cap",
+                repository_id=str(repository.id),
+                pull_request_number=number,
+                changed_files=changed_files,
+            )
+        else:
+            files = client.list_pull_request_files(
+                repository.owner_login,
+                repository.name,
+                number,
+            )
+            calculate_and_persist_pull_request_risk(
+                database_engine,
+                repository.workspace_id,
+                repository.id,
+                pull_request_id,
+                pull_request,
+                files,
+                commits,
+            )
+        count += 1
+
+    if result.next_page is not None:
+        return {"stage": OPEN_PULL_REQUEST_STAGE, "page": result.next_page}, count
+    if risk_only:
+        return None, count
+    return {"stage": PULL_REQUEST_STAGE, "page": 1}, count
 
 
 def _process_pull_request_page(
@@ -295,11 +372,16 @@ def _process_deployment_page(
 
 def _cursor(value: object, cutoff: datetime, started_at: datetime) -> dict[str, Any]:
     if value is None:
-        return {"stage": PULL_REQUEST_STAGE, "page": 1}
+        return {"stage": OPEN_PULL_REQUEST_STAGE, "page": 1}
     if not isinstance(value, dict):
         raise PermanentJobError("Invalid backfill cursor")
     stage = value.get("stage")
-    if stage not in {PULL_REQUEST_STAGE, WORKFLOW_RUN_STAGE, DEPLOYMENT_STAGE}:
+    if stage not in {
+        OPEN_PULL_REQUEST_STAGE,
+        PULL_REQUEST_STAGE,
+        WORKFLOW_RUN_STAGE,
+        DEPLOYMENT_STAGE,
+    }:
         raise PermanentJobError("Invalid backfill cursor stage")
     page = value.get("page")
     if isinstance(page, bool) or not isinstance(page, int) or page < 1:
@@ -330,6 +412,19 @@ def _cursor(value: object, cutoff: datetime, started_at: datetime) -> dict[str, 
         "windowEnd": window_end.isoformat(),
         "pendingWindows": pending,
     }
+
+
+def _changed_files(pull_request: dict[str, Any]) -> int:
+    value = pull_request.get("changed_files")
+    if isinstance(value, bool):
+        raise PermanentJobError("GitHub returned an invalid changed_files count")
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError) as exc:
+        raise PermanentJobError("GitHub returned an invalid changed_files count") from exc
+    if parsed < 0:
+        raise PermanentJobError("GitHub returned a negative changed_files count")
+    return parsed
 
 
 def _workflow_cursor(cutoff: datetime, started_at: datetime) -> dict[str, Any]:

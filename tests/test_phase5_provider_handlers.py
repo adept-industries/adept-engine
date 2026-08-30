@@ -815,6 +815,12 @@ def test_repository_backfill_pages_without_spending_retry_attempts(
         def __exit__(self, *_args: object) -> None:
             pass
 
+        def list_open_pull_requests(
+            self, _owner: str, _repository: str, page: int
+        ) -> ProviderPage[dict[str, Any]]:
+            assert page == 1
+            return ProviderPage([], None)
+
         def list_closed_pull_requests(
             self, _owner: str, _repository: str, page: int
         ) -> ProviderPage[dict[str, Any]]:
@@ -910,11 +916,19 @@ def test_repository_backfill_pages_without_spending_retry_attempts(
     requeued = job_factory.row(job_id)
     assert requeued["status"] == "PENDING"
     assert requeued["attempts"] == 0
-    assert requeued["payload"]["cursor"]["stage"] == "workflow_runs"
+    assert requeued["payload"]["cursor"]["stage"] == "pull_requests"
     assert requeued["payload"]["cursor"]["page"] == 1
 
     second = claim_jobs(database_engine, "provider-test-worker", 1)[0]
     dispatch_job(database_engine, second, "provider-test-worker")
+    requeued = job_factory.row(job_id)
+    assert requeued["status"] == "PENDING"
+    assert requeued["attempts"] == 0
+    assert requeued["payload"]["cursor"]["stage"] == "workflow_runs"
+    assert requeued["payload"]["cursor"]["page"] == 1
+
+    third = claim_jobs(database_engine, "provider-test-worker", 1)[0]
+    dispatch_job(database_engine, third, "provider-test-worker")
     assert job_factory.row(job_id)["status"] == "SUCCEEDED"
     with database_engine.connect() as connection:
         assert (

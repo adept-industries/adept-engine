@@ -1,141 +1,179 @@
-"""PR Risk ML Model Service using XGBoost, probability calibration, and SHAP explanations."""
+"""Verified inference runtime for the approved seven-feature model artifact."""
 
-from datetime import UTC, datetime
+from __future__ import annotations
+
+import hashlib
+import json
+import platform
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import joblib
 import numpy as np
-import pandas as pd
-import shap
+import sklearn
 import structlog
 
-from app.core.config import get_settings
-from app.risk.features import RISK_FEATURES, risk_level, validate_feature_dict
+from app.risk.features import FEATURE_ORDER, FEATURE_SCHEMA_VERSION, PullRequestRiskFeatures
+
+MODEL_NAME = "jitfine-expert-pr-risk-mvp"
+MODEL_VERSION = "jitfine-expert-pr-risk-mvp-v1"
+DEFAULT_ARTIFACT_DIRECTORY = Path(__file__).resolve().parent / "artifacts" / MODEL_VERSION
 
 logger = structlog.get_logger()
 
 
-class RiskModelService:
-    def __init__(self, artifact_dir: str | Path | None = None) -> None:
-        settings = get_settings()
-        self.artifact_dir = Path(artifact_dir or settings.risk_model_dir)
-        self.model: Any = None
-        self.calibrator: Any = None
+@dataclass(frozen=True, slots=True)
+class RiskPredictionResult:
+    probability: float
+    level: str
+    threshold_used: float
+    top_factors: list[dict[str, Any]]
+
+
+class JitFineRiskModel:
+    def __init__(self, artifact_directory: Path | str = DEFAULT_ARTIFACT_DIRECTORY) -> None:
+        self.artifact_directory = Path(artifact_directory)
+        self.model: Any | None = None
         self.metadata: dict[str, Any] | None = None
-        self.explainer: Any = None
-
-    def load(self) -> bool:
-        """Loads trained XGBoost model, calibrator, metadata, and SHAP explainer."""
-        model_path = self.artifact_dir / "risk_model.joblib"
-        cal_path = self.artifact_dir / "risk_calibrator.joblib"
-        meta_path = self.artifact_dir / "risk_metadata.joblib"
-
-        if not (model_path.exists() and cal_path.exists() and meta_path.exists()):
-            logger.info("risk_model_not_found_auto_training_demo", dir=str(self.artifact_dir))
-            try:
-                from app.risk.synthetic import generate_synthetic_pr_dataset
-                from app.risk.trainer import train_risk_model
-
-                df = generate_synthetic_pr_dataset(n_samples=5000, seed=42)
-                train_risk_model(df, artifact_dir=self.artifact_dir, is_demo=True)
-            except Exception as exc:
-                logger.error("risk_model_auto_train_failed", error=str(exc))
-                return False
-
-        try:
-            self.model = joblib.load(model_path)
-            self.calibrator = joblib.load(cal_path)
-            self.metadata = joblib.load(meta_path)
-            self.explainer = shap.TreeExplainer(self.model)
-            logger.info(
-                "risk_model_loaded_successfully",
-                version=self.metadata.get("model_version"),
-                medium_threshold=self.metadata.get("medium_threshold"),
-                high_threshold=self.metadata.get("high_threshold"),
-            )
-            return True
-        except Exception as exc:
-            logger.error("risk_model_load_failed", error=str(exc))
-            self.model = None
-            self.calibrator = None
-            self.metadata = None
-            self.explainer = None
-            return False
+        self.positive_class_position: int | None = None
 
     @property
     def ready(self) -> bool:
         return (
             self.model is not None
-            and self.calibrator is not None
             and self.metadata is not None
-            and self.explainer is not None
+            and self.positive_class_position is not None
         )
 
-    def predict(self, feature_dict: dict[str, Any]) -> dict[str, Any]:
-        """Runs inference on validated features, returning calibrated risk and SHAP factors."""
+    def load(self) -> None:
+        metadata_path = self.artifact_directory / "metadata.json"
+        model_path = self.artifact_directory / "model.joblib"
+        report_path = self.artifact_directory / "training-report.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        self._verify_metadata(metadata, model_path, report_path)
+
+        model = joblib.load(model_path)
+        if int(getattr(model, "n_features_in_", -1)) != len(FEATURE_ORDER):
+            raise RuntimeError("PR-risk artifact input width does not match its contract")
+        classes = np.asarray(getattr(model, "classes_", []))
+        positive_positions = np.flatnonzero(classes == 1)
+        if positive_positions.size != 1:
+            raise RuntimeError("PR-risk artifact positive class cannot be identified")
+
+        self.model = model
+        self.metadata = metadata
+        self.positive_class_position = int(positive_positions[0])
+        logger.info(
+            "pr_risk_model_loaded",
+            model_name=MODEL_NAME,
+            model_version=MODEL_VERSION,
+            feature_schema_version=FEATURE_SCHEMA_VERSION,
+        )
+
+    def predict(self, features: PullRequestRiskFeatures) -> RiskPredictionResult:
         if not self.ready:
-            raise RuntimeError(
-                "Risk model is not loaded. Train a model first via "
-                "'uv run python -m app.risk.cli train-demo'."
-            )
+            self.load()
+        if self.model is None or self.metadata is None or self.positive_class_position is None:
+            raise RuntimeError("PR-risk model did not initialize")
 
-        validated = validate_feature_dict(feature_dict)
-        X = pd.DataFrame([[validated[f] for f in RISK_FEATURES]], columns=RISK_FEATURES)
+        row = np.asarray([features.as_ordered_values()], dtype=np.float64)
+        probabilities = np.asarray(self.model.predict_proba(row), dtype=np.float64)
+        probability = float(probabilities[0, self.positive_class_position])
+        if not np.isfinite(probability) or not 0.0 <= probability <= 1.0:
+            raise RuntimeError("PR-risk model returned an invalid probability")
 
-        # 1. Base XGBoost probability
-        raw_prob_arr = self.model.predict_proba(X)
-        raw_p = (
-            float(raw_prob_arr[:, 1][0]) if raw_prob_arr.shape[1] > 1 else float(raw_prob_arr[0][0])
-        )
+        thresholds = self._thresholds()
+        level, threshold_used = _classify_probability(probability, thresholds)
+        importances = np.asarray(getattr(self.model, "feature_importances_", []), dtype=float)
+        top_factors = _global_importance_factors(features, importances)
+        return RiskPredictionResult(probability, level, threshold_used, top_factors)
 
-        # 2. Probability calibration
-        cal_input = np.array([[raw_p]])
-        cal_prob_arr = self.calibrator.predict_proba(cal_input)
-        calibrated_p = (
-            float(cal_prob_arr[:, 1][0]) if cal_prob_arr.shape[1] > 1 else float(cal_prob_arr[0][0])
-        )
-        calibrated_p = max(0.0, min(1.0, calibrated_p))
-
-        # 3. SHAP TreeExplainer factors
-        shap_values = self.explainer.shap_values(X)
-        shap_arr = np.asarray(shap_values)
-        if shap_arr.ndim == 3:
-            shap_arr = shap_arr[:, :, -1]
-        elif shap_arr.ndim == 1:
-            shap_arr = shap_arr.reshape(1, -1)
-
-        row = shap_arr[0]
-        feature_values = X.iloc[0].tolist()
-        ranked = sorted(
-            zip(RISK_FEATURES, row, feature_values, strict=False),
-            key=lambda item: abs(float(item[1])),
-            reverse=True,
-        )[:5]
-
-        top_factors = [
-            {
-                "feature": name,
-                "value": round(float(val), 4),
-                "impact": round(float(imp), 4),
-                "direction": "raises_risk" if float(imp) > 0 else "lowers_risk",
-            }
-            for name, imp, val in ranked
-        ]
-
-        meta = self.metadata or {}
-        medium_thresh = float(meta.get("medium_threshold", 0.15))
-        high_thresh = float(meta.get("high_threshold", 0.30))
-        level = risk_level(calibrated_p, medium_threshold=medium_thresh, high_threshold=high_thresh)
-
-        return {
-            "probability": round(calibrated_p, 4),
-            "risk_level": level,
-            "model_version": meta.get("model_version", "unknown"),
-            "top_factors": top_factors,
-            "predicted_at": datetime.now(UTC),
+    def _verify_metadata(
+        self,
+        metadata: dict[str, Any],
+        model_path: Path,
+        report_path: Path,
+    ) -> None:
+        expected = {
+            "modelName": MODEL_NAME,
+            "modelVersion": MODEL_VERSION,
+            "featureSchemaVersion": FEATURE_SCHEMA_VERSION,
+            "featureOrder": list(FEATURE_ORDER),
+            "pythonVersion": platform.python_version(),
+            "scikitLearnVersion": sklearn.__version__,
+            "numpyVersion": np.__version__,
+            "joblibVersion": joblib.__version__,
         }
+        for key, value in expected.items():
+            if metadata.get(key) != value:
+                raise RuntimeError(f"PR-risk artifact metadata mismatch for {key}")
+        checksums = metadata.get("sha256")
+        if not isinstance(checksums, dict):
+            raise RuntimeError("PR-risk artifact checksums are missing")
+        for filename, path in (("model.joblib", model_path), ("training-report.json", report_path)):
+            if checksums.get(filename) != _sha256(path):
+                raise RuntimeError(f"PR-risk artifact checksum mismatch for {filename}")
+        self._validated_thresholds(metadata)
+
+    def _thresholds(self) -> dict[str, float]:
+        if self.metadata is None:
+            raise RuntimeError("PR-risk model metadata is not loaded")
+        return self._validated_thresholds(self.metadata)
+
+    @staticmethod
+    def _validated_thresholds(metadata: dict[str, Any]) -> dict[str, float]:
+        raw = metadata.get("thresholds")
+        if not isinstance(raw, dict):
+            raise RuntimeError("PR-risk artifact thresholds are missing")
+        try:
+            values = {name: float(raw[name]) for name in ("medium", "high", "critical")}
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("PR-risk artifact thresholds are invalid") from exc
+        if not 0.0 <= values["medium"] < values["high"] < values["critical"] <= 1.0:
+            raise RuntimeError("PR-risk artifact thresholds are not strictly ordered")
+        return values
 
 
-# Global singleton instance
-risk_model = RiskModelService()
+def _classify_probability(probability: float, thresholds: dict[str, float]) -> tuple[str, float]:
+    if probability >= thresholds["critical"]:
+        return "CRITICAL", thresholds["critical"]
+    if probability >= thresholds["high"]:
+        return "HIGH", thresholds["high"]
+    if probability >= thresholds["medium"]:
+        return "MEDIUM", thresholds["medium"]
+    return "LOW", thresholds["medium"]
+
+
+def _global_importance_factors(
+    features: PullRequestRiskFeatures,
+    importances: np.ndarray[Any, Any],
+) -> list[dict[str, Any]]:
+    if importances.shape != (len(FEATURE_ORDER),):
+        return []
+    values = features.as_dict()
+    ranked = sorted(
+        zip(FEATURE_ORDER, importances, strict=True),
+        key=lambda item: float(item[1]),
+        reverse=True,
+    )[:3]
+    return [
+        {
+            "feature": name,
+            "value": values[name],
+            "globalImportance": round(float(importance), 6),
+            "explanationType": "global_model_importance",
+        }
+        for name, importance in ranked
+    ]
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file_handle:
+        for chunk in iter(lambda: file_handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+risk_model = JitFineRiskModel()

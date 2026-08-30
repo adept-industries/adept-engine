@@ -4,9 +4,11 @@ The engine is Adept's internal Python process and background-worker foundation.
 
 ## Current status
 
-The implementation through Phase 6 polls and claims durable jobs safely, recovers stale claims, applies bounded retries, dispatches provider synchronization/backfill/webhook work, performs idempotent normalization, completes guarded workspace deletion, and calculates versioned DORA snapshots. Production classification uses configured branch, workflow, and environment patterns; pull-request linkage uses exact SHAs, normalized commit membership, and a merge-window fallback. GitHub production failures and recoveries drive normalized incidents, while recalculation work is repository-deduplicated and limited to affected calendar periods plus their preceding periods.
+The engine polls and claims durable jobs safely, recovers stale claims, applies bounded retries, dispatches provider synchronization/backfill/webhook work, performs idempotent normalization, completes guarded workspace deletion, and calculates versioned DORA snapshots. Production classification uses configured branch, workflow, and environment patterns; pull-request linkage uses exact SHAs, normalized commit membership, and a merge-window fallback. GitHub production failures and recoveries drive normalized incidents, while recalculation work is repository-deduplicated and limited to affected calendar periods plus their preceding periods.
 
-The API's Flyway migrations exclusively own the schema. The engine supports schema versions 7 through 13 during the forward-compatible rollout and must not add Alembic or create tables.
+PR-risk inference uses only the approved `jitfine-expert-pr-risk-mvp-v1` artifact and the frozen `ns, nd, nf, entropy, la, ld, fix` order. Open-PR webhook updates and repository backfills collect complete GitHub file and commit membership, persist `jitfine-pr-features-v1`, and atomically upsert one model-version prediction. Runtime file scope is all files returned by GitHub; the persisted feature payload and model metadata document the known training/runtime limitation. The score is review-prioritization support, not proof of a defect.
+
+The API's Flyway migrations exclusively own the schema. The engine supports schema versions 7 through 14 during the forward-compatible rollout and must not add Alembic or create tables.
 
 ## Install
 
@@ -58,7 +60,7 @@ The engine CI database job provisions PostgreSQL, runs the real API Flyway migra
 ## Image
 
 ```bash
-docker build -t adept-engine:phase6 .
+docker build -t adept-engine:latest .
 ```
 
 After the complete `CI` workflow succeeds for a push to `main`, the publish

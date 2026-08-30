@@ -90,6 +90,28 @@ class GithubClient:
         items = _list_body(body)
         return ProviderPage(items, page + 1 if len(items) == per_page else None)
 
+    def list_open_pull_requests(
+        self,
+        owner: str,
+        repository: str,
+        page: int,
+        *,
+        per_page: int = 50,
+    ) -> ProviderPage[dict[str, Any]]:
+        body = self._request_json(
+            "GET",
+            f"/repos/{owner}/{repository}/pulls",
+            params={
+                "state": "open",
+                "sort": "updated",
+                "direction": "desc",
+                "page": page,
+                "per_page": per_page,
+            },
+        )
+        items = _list_body(body)
+        return ProviderPage(items, page + 1 if len(items) == per_page else None)
+
     def get_pull_request(self, owner: str, repository: str, number: int) -> dict[str, Any]:
         return self._request_json("GET", f"/repos/{owner}/{repository}/pulls/{number}")
 
@@ -110,6 +132,27 @@ class GithubClient:
             if len(batch) < 100:
                 return commits
             page += 1
+
+    def list_pull_request_files(
+        self, owner: str, repository: str, number: int
+    ) -> list[dict[str, Any]]:
+        """Return every file GitHub exposes for a pull request.
+
+        GitHub caps this endpoint at 3,000 files. Callers compare the result
+        count with ``changed_files`` and decline to score incomplete changes.
+        """
+        files: list[dict[str, Any]] = []
+        for page in range(1, 31):
+            body = self._request_json(
+                "GET",
+                f"/repos/{owner}/{repository}/pulls/{number}/files",
+                params={"page": page, "per_page": 100},
+            )
+            batch = _list_body(body)
+            files.extend(batch)
+            if len(batch) < 100:
+                break
+        return files
 
     def list_workflow_runs(
         self,

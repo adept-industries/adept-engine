@@ -24,7 +24,6 @@ class Settings(BaseSettings):
     engine_max_job_attempts: int = Field(default=8, ge=1, le=100)
     engine_job_lock_timeout_seconds: int = Field(default=900, ge=30, le=86_400)
 
-    risk_model_dir: str = Field(default="model_artifacts")
     stale_pr_hours_threshold: int = Field(default=120, ge=1)
     outcome_observation_window_days: int = Field(default=14, ge=1)
     app_internal_engine_token: str = Field(default="")

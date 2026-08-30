@@ -10,6 +10,14 @@ def test_supports_current_and_next_project_jira_schema_during_rollout() -> None:
     assert {"13", "14"}.issubset(SUPPORTED_SCHEMA_VERSIONS)
 
 
+def test_health_reports_the_embedded_pr_risk_artifact_ready() -> None:
+    with TestClient(main_module.app) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "UP", "modelReady": True}
+
+
 @pytest.mark.integration
 def test_ready_requires_a_supported_flyway_schema(
     database_engine: Engine,
