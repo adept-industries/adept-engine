@@ -367,7 +367,7 @@ def _process_deployment_page(
         deployment_id = deployment.get("id")
         if not isinstance(deployment_id, int):
             raise PermanentJobError("GitHub returned a deployment without an id")
-        status = client.latest_deployment_status(
+        status = client.terminal_deployment_status(
             repository.owner_login, repository.name, deployment_id
         )
         if status is None:

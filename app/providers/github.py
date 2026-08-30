@@ -221,16 +221,30 @@ class GithubClient:
         items = _list_body(body)
         return ProviderPage(items, page + 1 if len(items) == per_page else None)
 
-    def latest_deployment_status(
-        self, owner: str, repository: str, deployment_id: int
+    def terminal_deployment_status(
+        self,
+        owner: str,
+        repository: str,
+        deployment_id: int,
+        *,
+        per_page: int = 100,
     ) -> dict[str, Any] | None:
-        body = self._request_json(
-            "GET",
-            f"/repos/{owner}/{repository}/deployments/{deployment_id}/statuses",
-            params={"page": 1, "per_page": 1},
-        )
-        statuses = _list_body(body)
-        return statuses[0] if statuses else None
+        """Return the newest success/failure even when GitHub later marks it inactive."""
+        page = 1
+        while True:
+            body = self._request_json(
+                "GET",
+                f"/repos/{owner}/{repository}/deployments/{deployment_id}/statuses",
+                params={"page": page, "per_page": per_page},
+            )
+            statuses = _list_body(body)
+            for status in statuses:
+                state = str(status.get("state") or "").lower()
+                if state in {"success", "failure"}:
+                    return status
+            if len(statuses) < per_page:
+                return None
+            page += 1
 
     def _request_json(
         self,
