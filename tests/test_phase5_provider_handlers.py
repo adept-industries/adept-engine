@@ -34,7 +34,7 @@ from app.normalization import deployments as deployment_normalization
 from app.normalization import pull_requests as pull_request_normalization
 from app.providers.crypto import encrypt_integration_secret
 from app.providers.github import ProviderPage
-from app.providers.jira import JiraOAuthTokens
+from app.providers.jira import JiraIssuePage, JiraOAuthTokens
 from tests.conftest import JobFactory
 
 
@@ -1017,6 +1017,205 @@ def test_jira_project_sync_preserves_tracking_and_is_idempotent(
 
 
 @pytest.mark.integration
+def test_issue_only_github_backfill_filters_pull_requests_and_closes_missing_issues(
+    database_engine: Engine,
+    provider_rows: ProviderRows,
+    job_factory: JobFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    with database_engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO github_issues (
+                    workspace_id, repository_id, github_issue_id, number, title, state,
+                    github_created_at, github_updated_at, last_synced_at, raw_data
+                ) VALUES (
+                    :workspace_id, :repository_id, 8001, 8, 'No longer open', 'OPEN',
+                    :created_at, :created_at, :created_at, '{}'::jsonb
+                )
+                """
+            ),
+            {
+                "workspace_id": provider_rows.workspace_id,
+                "repository_id": provider_rows.repository_id,
+                "created_at": now - timedelta(days=2),
+            },
+        )
+
+    class FakeGithubClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> FakeGithubClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def list_open_issues(
+            self, _owner: str, _repository: str, page: int
+        ) -> ProviderPage[dict[str, Any]]:
+            assert page == 1
+            return ProviderPage(
+                [
+                    {
+                        "id": 7001,
+                        "node_id": "I_7001",
+                        "number": 7,
+                        "title": "Current issue",
+                        "state": "open",
+                        "user": {"login": "developer"},
+                        "assignees": [{"login": "lead"}],
+                        "labels": [{"name": "bug"}],
+                        "comments": 2,
+                        "created_at": (now - timedelta(days=1)).isoformat(),
+                        "updated_at": now.isoformat(),
+                        "closed_at": None,
+                    },
+                    {
+                        "id": 9001,
+                        "number": 9,
+                        "title": "Pull request shape",
+                        "pull_request": {"url": "https://api.github.test/pulls/9"},
+                    },
+                ],
+                None,
+            )
+
+    monkeypatch.setattr(backfill_repository, "GithubClient", FakeGithubClient)
+    job_id = job_factory.insert(
+        job_type="BACKFILL_REPOSITORY",
+        payload={"repositoryId": str(provider_rows.repository_id), "issuesOnly": True},
+    )
+    claimed = claim_jobs(database_engine, "provider-test-worker", 1)[0]
+    dispatch_job(database_engine, claimed, "provider-test-worker")
+
+    assert job_factory.row(job_id)["status"] == "SUCCEEDED"
+    with database_engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                """
+                SELECT github_issue_id, state, assignee_logins, labels
+                FROM github_issues
+                WHERE repository_id = :repository_id
+                ORDER BY github_issue_id
+                """
+            ),
+            {"repository_id": provider_rows.repository_id},
+        ).all()
+    assert [(row[0], row[1]) for row in rows] == [(7001, "OPEN"), (8001, "CLOSED")]
+    assert list(rows[0][2]) == ["lead"]
+    assert list(rows[0][3]) == ["bug"]
+
+
+@pytest.mark.integration
+def test_issue_only_jira_sync_pages_and_resolves_missing_issues(
+    database_engine: Engine,
+    provider_rows: ProviderRows,
+    job_factory: JobFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    with database_engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO jira_issues (
+                    workspace_id, jira_project_id, jira_issue_id, issue_key,
+                    summary, is_incident, jira_created_at, jira_updated_at,
+                    raw_data, created_at, updated_at
+                ) VALUES (
+                    :workspace_id, :jira_project_id, '29999', 'ADEPT-OLD',
+                    'No longer unresolved', false, :old_at, :old_at,
+                    '{}'::jsonb, :old_at, :old_at
+                )
+                """
+            ),
+            {
+                "workspace_id": provider_rows.workspace_id,
+                "jira_project_id": provider_rows.jira_project_id,
+                "old_at": now - timedelta(days=2),
+            },
+        )
+
+    class FakeJiraClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> FakeJiraClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def list_unresolved_issues(self, project_key: str, token: str | None) -> JiraIssuePage:
+            assert project_key == "ADEPT"
+            number = 1 if token is None else 2
+            next_token = "page-2" if token is None else None
+            return JiraIssuePage(
+                [
+                    {
+                        "id": str(20000 + number),
+                        "key": f"ADEPT-{number}",
+                        "fields": {
+                            "project": {"id": "10000"},
+                            "issuetype": {"name": "Bug"},
+                            "status": {"name": "Open"},
+                            "priority": {"name": "High"},
+                            "summary": f"Issue {number}",
+                            "created": (now - timedelta(days=1)).isoformat(),
+                            "updated": now.isoformat(),
+                            "resolutiondate": None,
+                        },
+                    }
+                ],
+                next_token,
+            )
+
+    monkeypatch.setattr(sync_jira_projects, "JiraClient", FakeJiraClient)
+    monkeypatch.setattr(
+        sync_jira_projects,
+        "get_valid_jira_access_token",
+        lambda _engine, integration, _settings: ("access-token", integration),
+    )
+    job_id = job_factory.insert(
+        job_type="SYNC_JIRA_PROJECTS",
+        payload={
+            "workspaceId": str(provider_rows.workspace_id),
+            "jiraIntegrationId": str(provider_rows.jira_integration_id),
+            "jiraProjectIds": [str(provider_rows.jira_project_id)],
+            "issuesOnly": True,
+        },
+    )
+
+    first = claim_jobs(database_engine, "provider-test-worker", 1)[0]
+    dispatch_job(database_engine, first, "provider-test-worker")
+    assert job_factory.row(job_id)["payload"]["cursor"]["nextPageToken"] == "page-2"
+    second = claim_jobs(database_engine, "provider-test-worker", 1)[0]
+    dispatch_job(database_engine, second, "provider-test-worker")
+
+    assert job_factory.row(job_id)["status"] == "SUCCEEDED"
+    with database_engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                """
+                SELECT issue_key, resolved_at
+                FROM jira_issues
+                WHERE jira_project_id = :jira_project_id
+                ORDER BY issue_key
+                """
+            ),
+            {"jira_project_id": provider_rows.jira_project_id},
+        ).all()
+    assert [row[0] for row in rows] == ["ADEPT-1", "ADEPT-2", "ADEPT-OLD"]
+    assert rows[0][1] is None
+    assert rows[1][1] is None
+    assert rows[2][1] is not None
+
+
+@pytest.mark.integration
 def test_concurrent_jira_jobs_rotate_one_refresh_token_once(
     database_engine: Engine,
     provider_rows: ProviderRows,
@@ -1337,6 +1536,83 @@ def test_jira_issue_delivery_is_idempotent_and_updates_raw_lifecycle(
     assert issue["issue_key"] == "ADEPT-1"
     assert issue["summary"] == "Provider retry issue"
     assert issue["version"] == 2
+    assert raw["status"] == "PROCESSED"
+    assert raw["attempt_count"] == 2
+    assert raw["processed_at"] is not None
+    assert raw["last_error"] is None
+
+
+@pytest.mark.integration
+def test_github_issue_delivery_is_idempotent_and_updates_raw_lifecycle(
+    database_engine: Engine,
+    provider_rows: ProviderRows,
+) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    payload = {
+        "issue": {
+            "id": 31001,
+            "node_id": "I_31001",
+            "number": 31,
+            "title": "Provider retry issue",
+            "state": "open",
+            "user": {"login": "developer"},
+            "assignees": [],
+            "labels": [{"name": "bug"}],
+            "comments": 1,
+            "created_at": (now - timedelta(hours=1)).isoformat(),
+            "updated_at": now.isoformat(),
+            "closed_at": None,
+        }
+    }
+    raw_event_id = _raw_event(
+        database_engine,
+        provider_rows,
+        source="GITHUB",
+        event_type="issues",
+        action="opened",
+        repository_id=provider_rows.repository_id,
+        payload=payload,
+    )
+    job = _job("PROCESS_GITHUB_EVENT", {"rawEventId": str(raw_event_id)})
+    github_event.handle_process_github_event(database_engine, job, job.locked_by)
+    github_event.handle_process_github_event(database_engine, job, job.locked_by)
+
+    with database_engine.connect() as connection:
+        issue = (
+            connection.execute(
+                text(
+                    """
+                    SELECT number, title, state, version
+                    FROM github_issues
+                    WHERE repository_id = :repository_id AND github_issue_id = 31001
+                    """
+                ),
+                {"repository_id": provider_rows.repository_id},
+            )
+            .mappings()
+            .one()
+        )
+        raw = (
+            connection.execute(
+                text(
+                    """
+                    SELECT status, attempt_count, processed_at, last_error
+                    FROM raw_webhook_events WHERE id = :id
+                    """
+                ),
+                {"id": raw_event_id},
+            )
+            .mappings()
+            .one()
+        )
+    assert (issue["number"], issue["title"], issue["state"]) == (
+        31,
+        "Provider retry issue",
+        "OPEN",
+    )
+    # The inserted row starts at version 0; the repeated delivery performs one
+    # conflict update without creating a duplicate row.
+    assert issue["version"] == 1
     assert raw["status"] == "PROCESSED"
     assert raw["attempt_count"] == 2
     assert raw["processed_at"] is not None

@@ -146,6 +146,28 @@ def test_github_client_collects_all_pull_request_file_pages() -> None:
     assert file_pages == ["1", "2"]
 
 
+def test_github_client_lists_open_issues_with_stable_pagination() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/access_tokens"):
+            return httpx.Response(201, json={"token": "installation-token"})
+        return httpx.Response(200, json=[{"id": number} for number in range(100)])
+
+    http_client = httpx.Client(
+        base_url="https://api.github.com", transport=httpx.MockTransport(handler)
+    )
+    with GithubClient(_github_settings(), 99, http_client=http_client) as client:
+        result = client.list_open_issues("adept-industries", "adept-engine", 2)
+
+    request = requests[1]
+    assert request.url.path == "/repos/adept-industries/adept-engine/issues"
+    assert request.url.params["state"] == "open"
+    assert request.url.params["page"] == "2"
+    assert result.next_page == 3
+
+
 def test_github_rate_limit_preserves_bounded_retry_after() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/access_tokens"):
@@ -229,6 +251,30 @@ def test_jira_client_uses_cloud_api_path_and_paginates() -> None:
 
     assert result.items[0]["key"] == "ADEPT"
     assert result.next_page == 1
+
+
+def test_jira_client_searches_unresolved_project_issues_with_token_pagination() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer access-token"
+        assert request.url.path == "/ex/jira/cloud-1/rest/api/3/search/jql"
+        assert request.url.params["jql"] == (
+            'project = "ADEPT" AND resolution IS EMPTY ORDER BY updated DESC'
+        )
+        assert request.url.params["nextPageToken"] == "next-token"
+        assert "summary" in request.url.params["fields"]
+        return httpx.Response(
+            200,
+            json={"issues": [{"id": "10001", "key": "ADEPT-1"}], "nextPageToken": "last"},
+        )
+
+    http_client = httpx.Client(
+        base_url="https://api.atlassian.com", transport=httpx.MockTransport(handler)
+    )
+    with JiraClient(_settings(), "cloud-1", "access-token", http_client=http_client) as client:
+        result = client.list_unresolved_issues("ADEPT", "next-token")
+
+    assert result.items[0]["key"] == "ADEPT-1"
+    assert result.next_page_token == "last"
 
 
 def test_jira_refresh_rotates_refresh_token_and_scopes() -> None:

@@ -163,3 +163,31 @@ def test_closed_pull_request_event_normalizes_without_rescoring(
 
     client.list_pull_request_files.assert_not_called()
     score.assert_not_called()
+
+
+def test_issue_event_routes_to_issue_normalizer(monkeypatch: pytest.MonkeyPatch) -> None:
+    issue_id = uuid4()
+    normalize = MagicMock(return_value=issue_id)
+    monkeypatch.setattr(github_event.issue_normalizer, "upsert_github_issue", normalize)
+
+    workspace_id = uuid4()
+    repository_id = uuid4()
+    database_engine = MagicMock()
+    payload = {"issue": {"id": 100, "number": 7, "title": "Broken build"}}
+    github_event._dispatch(
+        database_engine,
+        "issues",
+        "opened",
+        payload,
+        workspace_id,
+        repository_id,
+        None,
+        MagicMock(),
+    )
+
+    normalize.assert_called_once_with(
+        database_engine,
+        workspace_id,
+        repository_id,
+        payload["issue"],
+    )

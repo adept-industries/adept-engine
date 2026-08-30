@@ -23,6 +23,12 @@ class JiraOAuthTokens:
     scopes: list[str]
 
 
+@dataclass(frozen=True, slots=True)
+class JiraIssuePage:
+    items: list[dict[str, Any]]
+    next_page_token: str | None
+
+
 class JiraClient:
     def __init__(
         self,
@@ -67,6 +73,31 @@ class JiraClient:
         if is_last or not projects or next_start >= total:
             return ProviderPage(projects, None)
         return ProviderPage(projects, next_start)
+
+    def list_unresolved_issues(
+        self,
+        project_key: str,
+        next_page_token: str | None,
+        *,
+        max_results: int = 100,
+    ) -> JiraIssuePage:
+        escaped_key = project_key.replace("\\", "\\\\").replace('"', '\\"')
+        params: dict[str, str | int] = {
+            "jql": f'project = "{escaped_key}" AND resolution IS EMPTY ORDER BY updated DESC',
+            "maxResults": max_results,
+            "fields": ("summary,issuetype,status,priority,created,updated,resolutiondate,project"),
+        }
+        if next_page_token is not None:
+            params["nextPageToken"] = next_page_token
+        body = self._request_json("GET", "/search/jql", params=params)
+        issues_raw = body.get("issues", [])
+        if not isinstance(issues_raw, list):
+            raise ProviderError("Jira issue search response field issues is not a list")
+        issues = [cast(dict[str, Any], item) for item in issues_raw if isinstance(item, dict)]
+        token = body.get("nextPageToken")
+        if token is not None and (not isinstance(token, str) or not token):
+            raise ProviderError("Jira issue search returned an invalid nextPageToken")
+        return JiraIssuePage(issues, token)
 
     def refresh_webhook(self, webhook_id: int) -> str:
         body = self._request_json(
@@ -113,7 +144,7 @@ class JiraClient:
         method: str,
         path: str,
         *,
-        params: dict[str, int] | None = None,
+        params: dict[str, str | int] | None = None,
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:

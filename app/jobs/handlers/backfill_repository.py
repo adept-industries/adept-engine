@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
-from sqlalchemy import Engine
+from sqlalchemy import Engine, text
 
 from app.core.config import get_settings
 from app.db.models import ClaimedJob
@@ -20,6 +20,7 @@ from app.normalization.deployments import (
     upsert_deployment_from_deployment_status,
     upsert_deployment_from_workflow_run,
 )
+from app.normalization.github_issues import upsert_github_issue
 from app.normalization.pull_requests import upsert_pull_request
 from app.providers.github import GithubClient, ProviderPage
 from app.risk.service import calculate_and_persist_pull_request_risk
@@ -30,15 +31,24 @@ OPEN_PULL_REQUEST_STAGE = "open_pull_requests"
 PULL_REQUEST_STAGE = "pull_requests"
 WORKFLOW_RUN_STAGE = "workflow_runs"
 DEPLOYMENT_STAGE = "deployments"
+ISSUE_STAGE = "issues"
 
 
 def handle_backfill_repository(database_engine: Engine, job: ClaimedJob, worker_id: str) -> None:
     repository_id = parse_uuid(job.payload.get("repositoryId"), "repositoryId")
     backfill_days = _bounded_days(job.payload.get("backfillDays", 90))
     risk_only = job.payload.get("riskOnly") is True
+    issues_only = job.payload.get("issuesOnly") is True
+    if risk_only and issues_only:
+        raise PermanentJobError("backfill cannot be both risk-only and issues-only")
     started_at = _started_at(job.payload.get("backfillStartedAt"))
     cutoff = started_at - timedelta(days=backfill_days)
-    cursor = _cursor(job.payload.get("cursor"), cutoff, started_at)
+    cursor = _cursor(
+        job.payload.get("cursor"),
+        cutoff,
+        started_at,
+        initial_stage=ISSUE_STAGE if issues_only else OPEN_PULL_REQUEST_STAGE,
+    )
     repository = load_github_repository(database_engine, repository_id)
 
     if repository.integration_status != "ACTIVE":
@@ -74,6 +84,7 @@ def handle_backfill_repository(database_engine: Engine, job: ClaimedJob, worker_
                 started_at,
                 cursor,
                 risk_only,
+                issues_only,
             )
     except Exception as exc:
         converted = provider_exception_as_job_error(exc)
@@ -99,7 +110,7 @@ def handle_backfill_repository(database_engine: Engine, job: ClaimedJob, worker_
         )
         return
 
-    if not risk_only:
+    if not risk_only and not issues_only:
         reclassify_repository_deployments(database_engine, repository.id)
         recalculate_repository_metrics(
             database_engine,
@@ -122,7 +133,12 @@ def _process_page(
     started_at: datetime,
     cursor: dict[str, Any],
     risk_only: bool,
+    issues_only: bool,
 ) -> tuple[dict[str, Any] | None, int]:
+    if issues_only:
+        if stage != ISSUE_STAGE:
+            raise PermanentJobError("issues-only backfill cannot process non-issue stages")
+        return _process_issue_page(database_engine, client, repository, page, started_at)
     if stage == OPEN_PULL_REQUEST_STAGE:
         return _process_open_pull_request_page(
             database_engine,
@@ -370,9 +386,63 @@ def _process_deployment_page(
     return next_cursor, count
 
 
-def _cursor(value: object, cutoff: datetime, started_at: datetime) -> dict[str, Any]:
+def _process_issue_page(
+    database_engine: Engine,
+    client: GithubClient,
+    repository: Any,
+    page: int,
+    sync_started_at: datetime,
+) -> tuple[dict[str, Any] | None, int]:
+    result = client.list_open_issues(repository.owner_login, repository.name, page)
+    count = 0
+    for issue in result.items:
+        normalized_id = upsert_github_issue(
+            database_engine,
+            repository.workspace_id,
+            repository.id,
+            issue,
+            observed_at=sync_started_at,
+        )
+        count += int(normalized_id is not None)
+
+    if result.next_page is not None:
+        return {"stage": ISSUE_STAGE, "page": result.next_page}, count
+
+    # Anything that was open locally but absent from GitHub's complete open
+    # result is now closed, deleted, or transferred out of this repository.
+    with database_engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                UPDATE github_issues
+                SET state = 'CLOSED',
+                    closed_at = COALESCE(closed_at, :sync_started_at),
+                    updated_at = now(),
+                    version = version + 1
+                WHERE repository_id = :repository_id
+                  AND workspace_id = :workspace_id
+                  AND state = 'OPEN'
+                  AND last_synced_at < :sync_started_at
+                """
+            ),
+            {
+                "repository_id": repository.id,
+                "workspace_id": repository.workspace_id,
+                "sync_started_at": sync_started_at,
+            },
+        )
+    return None, count
+
+
+def _cursor(
+    value: object,
+    cutoff: datetime,
+    started_at: datetime,
+    *,
+    initial_stage: str = OPEN_PULL_REQUEST_STAGE,
+) -> dict[str, Any]:
     if value is None:
-        return {"stage": OPEN_PULL_REQUEST_STAGE, "page": 1}
+        return {"stage": initial_stage, "page": 1}
     if not isinstance(value, dict):
         raise PermanentJobError("Invalid backfill cursor")
     stage = value.get("stage")
@@ -381,6 +451,7 @@ def _cursor(value: object, cutoff: datetime, started_at: datetime) -> dict[str, 
         PULL_REQUEST_STAGE,
         WORKFLOW_RUN_STAGE,
         DEPLOYMENT_STAGE,
+        ISSUE_STAGE,
     }:
         raise PermanentJobError("Invalid backfill cursor stage")
     page = value.get("page")

@@ -31,6 +31,7 @@ from app.metrics.service import (
     link_deployments_to_pull_requests,
 )
 from app.normalization import deployments as deployment_normalizer
+from app.normalization import github_issues as issue_normalizer
 from app.normalization import pull_requests as pr_normalizer
 from app.providers.github import GithubClient
 from app.risk.service import calculate_and_persist_pull_request_risk
@@ -40,6 +41,7 @@ logger = structlog.get_logger()
 HANDLED_EVENTS = frozenset(
     {
         "pull_request",
+        "issues",
         "workflow_run",
         "deployment_status",
         "push",
@@ -130,6 +132,15 @@ def _dispatch(
 ) -> None:
     if event_type == "pull_request":
         _handle_pull_request(
+            database_engine,
+            payload,
+            action,
+            workspace_id,
+            _required_repository(repository_id),
+            bound_logger,
+        )
+    elif event_type == "issues":
+        _handle_issue(
             database_engine,
             payload,
             action,
@@ -278,6 +289,55 @@ def _handle_pull_request(
                     affected_at=min(affected_candidates),
                 )
     bound_logger.info("pull_request_upserted", pr_db_id=str(pr_id), action=action)
+
+
+def _handle_issue(
+    database_engine: Engine,
+    payload: dict[str, Any],
+    action: str | None,
+    workspace_id: UUID,
+    repository_id: UUID,
+    bound_logger: Any,
+) -> None:
+    issue = payload.get("issue")
+    if not isinstance(issue, dict):
+        bound_logger.warning("github_issue_payload_missing_issue")
+        return
+    if isinstance(issue.get("pull_request"), dict):
+        bound_logger.info("github_issue_pull_request_shape_skipped")
+        return
+
+    provider_id = issue.get("id")
+    if action == "deleted":
+        if isinstance(provider_id, bool) or not isinstance(provider_id, int):
+            raise PermanentJobError("GitHub returned an issue without an id")
+        with database_engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    DELETE FROM github_issues
+                    WHERE workspace_id = :workspace_id
+                      AND repository_id = :repository_id
+                      AND github_issue_id = :github_issue_id
+                    """
+                ),
+                {
+                    "workspace_id": workspace_id,
+                    "repository_id": repository_id,
+                    "github_issue_id": provider_id,
+                },
+            )
+        bound_logger.info("github_issue_deleted", github_issue_id=provider_id)
+        return
+
+    issue_id = issue_normalizer.upsert_github_issue(
+        database_engine,
+        workspace_id,
+        repository_id,
+        issue,
+    )
+    if issue_id is not None:
+        bound_logger.info("github_issue_upserted", issue_db_id=str(issue_id), action=action)
 
 
 def _non_negative_changed_files(pull_request: dict[str, Any]) -> int:
