@@ -18,7 +18,11 @@ from sqlalchemy import Engine, text
 
 from app.core.config import get_settings
 from app.db.models import ClaimedJob
-from app.jobs.handlers.provider_support import load_github_repository, parse_uuid
+from app.jobs.handlers.provider_support import (
+    load_github_repository,
+    parse_uuid,
+    provider_exception_as_job_error,
+)
 from app.jobs.handlers.sync_github_repositories import _upsert_repository
 from app.jobs.retry import PermanentJobError, sanitize_error
 from app.metrics.service import (
@@ -29,6 +33,7 @@ from app.metrics.service import (
 from app.normalization import deployments as deployment_normalizer
 from app.normalization import pull_requests as pr_normalizer
 from app.providers.github import GithubClient
+from app.risk.service import calculate_and_persist_pull_request_risk
 
 logger = structlog.get_logger()
 
@@ -200,28 +205,63 @@ def _handle_pull_request(
             "pull_request_action_skipped", action=action, supported=sorted(supported_actions)
         )
         return
-    pr_data = payload.get("pull_request")
-    if not isinstance(pr_data, dict):
+    webhook_pr = payload.get("pull_request")
+    if not isinstance(webhook_pr, dict):
         bound_logger.warning("pull_request_payload_missing_pull_request_key")
         return
-    number = pr_data.get("number")
+    number = webhook_pr.get("number")
     if not isinstance(number, int):
         raise PermanentJobError("GitHub returned a pull request without a number")
     repository = load_github_repository(database_engine, repository_id)
-    with GithubClient(get_settings(), repository.installation_id) as client:
-        commits = client.list_pull_request_commits(
-            repository.owner_login,
-            repository.name,
-            number,
-        )
-    pr_id = pr_normalizer.upsert_pull_request(
-        database_engine,
-        workspace_id,
-        repository_id,
-        pr_data,
-        action,
-        commits,
-    )
+    try:
+        with GithubClient(get_settings(), repository.installation_id) as client:
+            # Read the current provider state instead of scoring a delayed webhook snapshot.
+            pr_data = client.get_pull_request(repository.owner_login, repository.name, number)
+            commits = client.list_pull_request_commits(
+                repository.owner_login,
+                repository.name,
+                number,
+            )
+            pr_id = pr_normalizer.upsert_pull_request(
+                database_engine,
+                workspace_id,
+                repository_id,
+                pr_data,
+                action,
+                commits,
+            )
+            if str(pr_data.get("state", "")).lower() == "open":
+                changed_files = _non_negative_changed_files(pr_data)
+                if changed_files > 3_000:
+                    bound_logger.warning(
+                        "pull_request_risk_skipped_github_file_cap",
+                        pr_db_id=str(pr_id),
+                        changed_files=changed_files,
+                    )
+                else:
+                    files = client.list_pull_request_files(
+                        repository.owner_login,
+                        repository.name,
+                        number,
+                    )
+                    calculate_and_persist_pull_request_risk(
+                        database_engine,
+                        workspace_id,
+                        repository_id,
+                        pr_id,
+                        pr_data,
+                        files,
+                        commits,
+                    )
+                    bound_logger.info(
+                        "pull_request_risk_upserted",
+                        pr_db_id=str(pr_id),
+                    )
+    except Exception as exc:
+        converted = provider_exception_as_job_error(exc)
+        if converted is exc:
+            raise
+        raise converted from exc
     if _pull_request_is_merged(database_engine, pr_id):
         previous_affected_at = earliest_linked_production_deployment(database_engine, pr_id)
         link_deployments_to_pull_requests(database_engine, repository_id)
@@ -238,6 +278,19 @@ def _handle_pull_request(
                     affected_at=min(affected_candidates),
                 )
     bound_logger.info("pull_request_upserted", pr_db_id=str(pr_id), action=action)
+
+
+def _non_negative_changed_files(pull_request: dict[str, Any]) -> int:
+    value = pull_request.get("changed_files")
+    if isinstance(value, bool):
+        raise PermanentJobError("GitHub returned an invalid changed_files count")
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError) as exc:
+        raise PermanentJobError("GitHub returned an invalid changed_files count") from exc
+    if parsed < 0:
+        raise PermanentJobError("GitHub returned a negative changed_files count")
+    return parsed
 
 
 def _pull_request_is_merged(database_engine: Engine, pull_request_id: UUID) -> bool:

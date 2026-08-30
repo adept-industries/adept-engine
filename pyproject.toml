@@ -14,9 +14,6 @@ dependencies = [
   "joblib>=1.4,<2.0",
   "numpy>=2.0,<3.0",
   "structlog>=25,<26",
-  "xgboost>=3.4.1",
-  "shap>=0.52.0",
-  "pandas>=3.0.5",
 ]
 
 [dependency-groups]
@@ -26,6 +23,7 @@ dev = [
   "pytest-cov>=6,<7",
   "ruff>=0.9,<1.0",
   "mypy>=1.14,<2.0",
+  "pandas>=3.0.5",
   "testcontainers[postgres]>=4.9,<5.0"
 ]
 
@@ -50,12 +48,8 @@ module = [
   "joblib",
   "pandas.*",
   "pandas",
-  "shap.*",
-  "shap",
   "sklearn.*",
-  "sklearn",
-  "xgboost.*",
-  "xgboost"
+  "sklearn"
 ]
 ignore_missing_imports = true
 

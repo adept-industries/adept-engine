@@ -121,6 +121,31 @@ def test_github_workflow_backfill_can_query_all_branches() -> None:
     assert "branch" not in requests[1].url.params
 
 
+def test_github_client_collects_all_pull_request_file_pages() -> None:
+    file_pages: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/access_tokens"):
+            return httpx.Response(201, json={"token": "installation-token"})
+        assert request.url.path == "/repos/adept-industries/adept-engine/pulls/42/files"
+        page = request.url.params["page"]
+        file_pages.append(page)
+        count = 100 if page == "1" else 2
+        return httpx.Response(
+            200,
+            json=[{"filename": f"src/file-{page}-{index}.py"} for index in range(count)],
+        )
+
+    http_client = httpx.Client(
+        base_url="https://api.github.com", transport=httpx.MockTransport(handler)
+    )
+    with GithubClient(_github_settings(), 99, http_client=http_client) as client:
+        files = client.list_pull_request_files("adept-industries", "adept-engine", 42)
+
+    assert len(files) == 102
+    assert file_pages == ["1", "2"]
+
+
 def test_github_rate_limit_preserves_bounded_retry_after() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/access_tokens"):
