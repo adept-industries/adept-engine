@@ -1,0 +1,294 @@
+{
+  "dataset": {
+    "archiveSha256": "9e5ca1a393b70ee7e87c410b162005958775f3f3732f9f83da9dd24a7dfe2b47",
+    "integrityChecks": {
+      "commitHashOneToOneJoin": "passed",
+      "entropyWithinBase2ShannonCeiling": "passed",
+      "featureAndChangeLabelsAgree": "passed",
+      "finiteSevenFeatureRows": "passed",
+      "noDuplicateCommitHashes": "passed",
+      "splitsDisjoint": "passed"
+    },
+    "joinKey": "commit_hash",
+    "licenseReview": "No licence file or GitHub licence declaration was present in the source repository when reviewed on 2026-08-30; raw data is not redistributed here.",
+    "name": "JIT-Fine replication package data.zip",
+    "source": "https://github.com/jacknichao/JIT-Fine",
+    "sourceFileSha256": {
+      "changes_test.pkl": "23107219e63648b6516d74ff73b1e696c5e8eb368f6766c10e88d61dadb0809d",
+      "changes_train.pkl": "088898f4c87a59dfeaaabdbc48488b7e224ea7109ee453d0e8d244146b715f85",
+      "changes_valid.pkl": "dc9bb8f3390b74b5329a2186332466c22d78e71047521c56f1d8b598147c723b",
+      "dataset_dict.pkl": "9006b36e814bbafcab2b7f82c443b4d117ec865836e706c3c9378737b688f5eb",
+      "features_test.pkl": "136eebbb1c1719bffbfed8f0d686e3c015c5756a7b3c43d6f700a07687ab58fa",
+      "features_train.pkl": "0b9992d77cd07f45a71bd327a3d408ed3f0ab7a907ffdc10f9916a8f226dc42a",
+      "features_valid.pkl": "e2ee48d5cd9e7f59bea726d4f6a71ef58712ae58d3388d8195a798369cf0d2cf"
+    },
+    "splits": {
+      "test": {
+        "classDistribution": {
+          "0": 5005,
+          "1": 475
+        },
+        "fixMessageComparison": {
+          "agree": 4912,
+          "messageRulePositive": 1006,
+          "preparedFixPositive": 884,
+          "preparedNegativeMessagePositive": 345,
+          "preparedPositiveMessageNegative": 223,
+          "rows": 5480
+        },
+        "rows": 5480,
+        "sourceSha256": {
+          "changes_test.pkl": "23107219e63648b6516d74ff73b1e696c5e8eb368f6766c10e88d61dadb0809d",
+          "features_test.pkl": "136eebbb1c1719bffbfed8f0d686e3c015c5756a7b3c43d6f700a07687ab58fa"
+        }
+      },
+      "train": {
+        "classDistribution": {
+          "0": 14984,
+          "1": 1390
+        },
+        "fixMessageComparison": {
+          "agree": 15085,
+          "messageRulePositive": 3717,
+          "preparedFixPositive": 3524,
+          "preparedNegativeMessagePositive": 741,
+          "preparedPositiveMessageNegative": 548,
+          "rows": 16374
+        },
+        "rows": 16374,
+        "sourceSha256": {
+          "changes_train.pkl": "088898f4c87a59dfeaaabdbc48488b7e224ea7109ee453d0e8d244146b715f85",
+          "features_train.pkl": "0b9992d77cd07f45a71bd327a3d408ed3f0ab7a907ffdc10f9916a8f226dc42a"
+        }
+      },
+      "valid": {
+        "classDistribution": {
+          "0": 4998,
+          "1": 467
+        },
+        "fixMessageComparison": {
+          "agree": 5064,
+          "messageRulePositive": 1048,
+          "preparedFixPositive": 1045,
+          "preparedNegativeMessagePositive": 202,
+          "preparedPositiveMessageNegative": 199,
+          "rows": 5465
+        },
+        "rows": 5465,
+        "sourceSha256": {
+          "changes_valid.pkl": "dc9bb8f3390b74b5329a2186332466c22d78e71047521c56f1d8b598147c723b",
+          "features_valid.pkl": "e2ee48d5cd9e7f59bea726d4f6a71ef58712ae58d3388d8195a798369cf0d2cf"
+        }
+      }
+    }
+  },
+  "environment": {
+    "joblib": "1.5.3",
+    "numpy": "2.5.1",
+    "pandas": "3.0.5",
+    "python": "3.14.7",
+    "scikitLearn": "1.9.0"
+  },
+  "featureContract": {
+    "entropy": "Unnormalized base-2 Shannon entropy over each changed file's share of total added plus deleted lines; zero for zero total changed lines. Verified exactly against three public Apache ant-ivy commits listed in entropyEvidence.",
+    "entropyEvidence": [
+      {
+        "commit": "2a5a07fcb1a24fded957d260f9a9df988323db19",
+        "expected": 0.8112781244591328,
+        "includedFileChurn": [
+          10,
+          30
+        ]
+      },
+      {
+        "commit": "4642f1df280891c2238e74935239096fba508ba0",
+        "expected": 1.4295487875817467,
+        "includedFileChurn": [
+          33,
+          22,
+          2,
+          4
+        ]
+      },
+      {
+        "commit": "36a1784d52126394afc5963d8139f8933bdd60c9",
+        "expected": 1.8120032760083444,
+        "includedFileChurn": [
+          20,
+          9,
+          35,
+          5,
+          73
+        ]
+      }
+    ],
+    "fileScopeFinding": "The prepared metrics exclude some non-source files visible in public commit metadata. This is recorded as a limitation and must be resolved before the runtime extractor claims exact feature parity.",
+    "fixTrainingConversion": "Exact booleans/0/1 or case-insensitive 'true'/'false' strings; unlike the source helper, the non-empty string 'False' is not converted with bool().",
+    "order": [
+      "ns",
+      "nd",
+      "nf",
+      "entropy",
+      "la",
+      "ld",
+      "fix"
+    ],
+    "schemaVersion": "jitfine-pr-features-v1"
+  },
+  "generatedAt": "2026-08-30T03:32:19.828115+00:00",
+  "limitations": [
+    "The training records are commit-level while runtime predictions aggregate a whole pull request.",
+    "Training projects and languages may differ from repositories analysed by Adept.",
+    "The score ranks estimated review risk and does not prove that a defect exists.",
+    "The prepared dataset FIX field is used for training; runtime keyword matching is an MVP approximation.",
+    "The prepared change metrics exclude some non-source files; the later runtime extractor must make and document a file-scope decision before claiming training/runtime parity."
+  ],
+  "model": {
+    "classImbalanceHandling": "None; no validation or test resampling was performed.",
+    "classifier": "sklearn.ensemble.RandomForestClassifier",
+    "name": "jitfine-expert-pr-risk-mvp",
+    "parameters": {
+      "n_estimators": 300,
+      "n_jobs": -1,
+      "random_state": 42
+    },
+    "version": "jitfine-expert-pr-risk-mvp-v1"
+  },
+  "reportVersion": 1,
+  "researchBaselineSeparation": "The JIT-Fine repository's published/reproduced 14-feature JITLine baseline is separate evidence and is not reported as this seven-feature model's result.",
+  "researchReproduction": {
+    "command": "python -m baselines.JITLine.jitline_rq2 -style manual",
+    "observed": {
+      "effortAt20PercentRecall": 0.0244,
+      "f1": 0.1525,
+      "pOpt": 0.8177,
+      "pciAt20PercentLoc": 0.6147,
+      "rocAuc": 0.6701
+    },
+    "scope": "Original 14-feature JITLine manual baseline; not this model."
+  },
+  "thresholdSelection": {
+    "method": "Validation-only thresholds maximizing F-beta: medium=F2 (recall weighted), high=F1, critical=F0.5 (precision weighted); lower threshold wins ties.",
+    "values": {
+      "critical": 0.36333333333333334,
+      "high": 0.17,
+      "medium": 0.08666666666666667
+    }
+  },
+  "untouchedTestMetrics": {
+    "brierScore": 0.08141949625972507,
+    "calibration": [
+      {
+        "meanPredictedProbability": 0.0,
+        "observedPositiveRate": 0.04657070279424217
+      },
+      {
+        "meanPredictedProbability": 0.005709742139909573,
+        "observedPositiveRate": 0.0825147347740668
+      },
+      {
+        "meanPredictedProbability": 0.012580006957190821,
+        "observedPositiveRate": 0.02734375
+      },
+      {
+        "meanPredictedProbability": 0.022754597349927075,
+        "observedPositiveRate": 0.058287795992714025
+      },
+      {
+        "meanPredictedProbability": 0.04039141296868345,
+        "observedPositiveRate": 0.048327137546468404
+      },
+      {
+        "meanPredictedProbability": 0.07184659758791863,
+        "observedPositiveRate": 0.0965391621129326
+      },
+      {
+        "meanPredictedProbability": 0.11948932963467933,
+        "observedPositiveRate": 0.0852994555353902
+      },
+      {
+        "meanPredictedProbability": 0.19897697795603753,
+        "observedPositiveRate": 0.1596330275229358
+      },
+      {
+        "meanPredictedProbability": 0.4068540990113603,
+        "observedPositiveRate": 0.21794871794871795
+      }
+    ],
+    "classificationThreshold": 0.17,
+    "confusionMatrix": {
+      "falseNegative": 285,
+      "falsePositive": 794,
+      "trueNegative": 4211,
+      "truePositive": 190
+    },
+    "effortAware": {
+      "effortAt20PercentRecall": 0.038438984893604144,
+      "pOpt": 0.6503510065467578,
+      "recallAt20PercentLoc": 0.4652631578947368
+    },
+    "f1": 0.2604523646333105,
+    "prAuc": 0.17875555789083414,
+    "precision": 0.19308943089430894,
+    "recall": 0.4,
+    "rocAuc": 0.6650980598349019
+  },
+  "validationMetrics": {
+    "brierScore": 0.07419398881649884,
+    "calibration": [
+      {
+        "meanPredictedProbability": 0.0,
+        "observedPositiveRate": 0.039473684210526314
+      },
+      {
+        "meanPredictedProbability": 0.004955926386938724,
+        "observedPositiveRate": 0.0502092050209205
+      },
+      {
+        "meanPredictedProbability": 0.011921915926508486,
+        "observedPositiveRate": 0.017013232514177693
+      },
+      {
+        "meanPredictedProbability": 0.01996857843110714,
+        "observedPositiveRate": 0.046875
+      },
+      {
+        "meanPredictedProbability": 0.03630729234583718,
+        "observedPositiveRate": 0.058519793459552494
+      },
+      {
+        "meanPredictedProbability": 0.06470400985933225,
+        "observedPositiveRate": 0.075046904315197
+      },
+      {
+        "meanPredictedProbability": 0.10287040693899635,
+        "observedPositiveRate": 0.09923664122137404
+      },
+      {
+        "meanPredictedProbability": 0.17647170636051787,
+        "observedPositiveRate": 0.15063520871143377
+      },
+      {
+        "meanPredictedProbability": 0.3743012615623484,
+        "observedPositiveRate": 0.2828096118299446
+      }
+    ],
+    "classificationThreshold": 0.17,
+    "confusionMatrix": {
+      "falseNegative": 261,
+      "falsePositive": 641,
+      "trueNegative": 4357,
+      "truePositive": 206
+    },
+    "effortAware": {
+      "effortAt20PercentRecall": 0.05328586735616486,
+      "pOpt": 0.6651243475021986,
+      "recallAt20PercentLoc": 0.43683083511777304
+    },
+    "f1": 0.3135464231354642,
+    "prAuc": 0.22614541452232126,
+    "precision": 0.24321133412042503,
+    "recall": 0.4411134903640257,
+    "rocAuc": 0.7209532635323938
+  }
+}
