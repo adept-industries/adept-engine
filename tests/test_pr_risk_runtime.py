@@ -131,7 +131,10 @@ def test_zero_churn_is_finite_and_fix_keyword_matching_is_bounded() -> None:
     assert features.fix == 0
 
 
-def test_approved_artifact_loads_and_predicts_in_the_frozen_order() -> None:
+def test_approved_artifact_loads_across_python_patch_versions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.risk.model.platform.python_version", lambda: "3.14.5")
     model = JitFineRiskModel()
     model.load()
 
@@ -147,6 +150,15 @@ def test_approved_artifact_loads_and_predicts_in_the_frozen_order() -> None:
     assert result.level in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
     assert len(result.top_factors) == 3
     assert all(item["explanationType"] == "global_model_importance" for item in result.top_factors)
+
+
+def test_approved_artifact_rejects_a_different_python_minor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.risk.model.platform.python_version", lambda: "3.15.0")
+
+    with pytest.raises(RuntimeError, match="metadata mismatch for pythonVersion"):
+        JitFineRiskModel().load()
 
 
 def test_probability_thresholds_use_all_four_database_risk_levels() -> None:

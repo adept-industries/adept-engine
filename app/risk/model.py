@@ -100,7 +100,6 @@ class JitFineRiskModel:
             "modelVersion": MODEL_VERSION,
             "featureSchemaVersion": FEATURE_SCHEMA_VERSION,
             "featureOrder": list(FEATURE_ORDER),
-            "pythonVersion": platform.python_version(),
             "scikitLearnVersion": sklearn.__version__,
             "numpyVersion": np.__version__,
             "joblibVersion": joblib.__version__,
@@ -108,6 +107,9 @@ class JitFineRiskModel:
         for key, value in expected.items():
             if metadata.get(key) != value:
                 raise RuntimeError(f"PR-risk artifact metadata mismatch for {key}")
+        artifact_python_version = metadata.get("pythonVersion")
+        if not _same_python_minor(artifact_python_version, platform.python_version()):
+            raise RuntimeError("PR-risk artifact metadata mismatch for pythonVersion")
         checksums = metadata.get("sha256")
         if not isinstance(checksums, dict):
             raise RuntimeError("PR-risk artifact checksums are missing")
@@ -174,6 +176,17 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: file_handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _same_python_minor(artifact_version: object, runtime_version: str) -> bool:
+    if not isinstance(artifact_version, str):
+        return False
+    try:
+        artifact_parts = tuple(int(part) for part in artifact_version.split(".")[:2])
+        runtime_parts = tuple(int(part) for part in runtime_version.split(".")[:2])
+    except ValueError:
+        return False
+    return len(artifact_parts) == 2 and artifact_parts == runtime_parts
 
 
 risk_model = JitFineRiskModel()
