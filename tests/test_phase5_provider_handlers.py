@@ -1019,6 +1019,7 @@ def test_jira_project_sync_preserves_tracking_and_is_idempotent(
 @pytest.mark.integration
 def test_issue_only_github_backfill_filters_pull_requests_and_closes_missing_issues(
     database_engine: Engine,
+    github_issues_schema: None,
     provider_rows: ProviderRows,
     job_factory: JobFactory,
     monkeypatch: pytest.MonkeyPatch,
@@ -1545,6 +1546,7 @@ def test_jira_issue_delivery_is_idempotent_and_updates_raw_lifecycle(
 @pytest.mark.integration
 def test_github_issue_delivery_is_idempotent_and_updates_raw_lifecycle(
     database_engine: Engine,
+    github_issues_schema: None,
     provider_rows: ProviderRows,
 ) -> None:
     now = datetime.now(UTC).replace(microsecond=0)
