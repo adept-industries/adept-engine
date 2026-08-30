@@ -118,6 +118,17 @@ def database_engine() -> Iterator[Engine]:
 
 
 @pytest.fixture
+def github_issues_schema(database_engine: Engine) -> None:
+    """Require the GitHub issue tables introduced by API Flyway V15."""
+    with database_engine.connect() as connection:
+        table_name = connection.execute(
+            text("SELECT to_regclass('public.github_issues')::text")
+        ).scalar_one()
+    if table_name != "github_issues":
+        pytest.skip("requires API Flyway V15 github_issues schema")
+
+
+@pytest.fixture
 def job_factory(database_engine: Engine) -> Iterator[JobFactory]:
     factory = JobFactory(database_engine)
     yield factory
