@@ -112,6 +112,28 @@ class GithubClient:
         items = _list_body(body)
         return ProviderPage(items, page + 1 if len(items) == per_page else None)
 
+    def list_open_issues(
+        self,
+        owner: str,
+        repository: str,
+        page: int,
+        *,
+        per_page: int = 100,
+    ) -> ProviderPage[dict[str, Any]]:
+        body = self._request_json(
+            "GET",
+            f"/repos/{owner}/{repository}/issues",
+            params={
+                "state": "open",
+                "sort": "updated",
+                "direction": "desc",
+                "page": page,
+                "per_page": per_page,
+            },
+        )
+        items = _list_body(body)
+        return ProviderPage(items, page + 1 if len(items) == per_page else None)
+
     def get_pull_request(self, owner: str, repository: str, number: int) -> dict[str, Any]:
         return self._request_json("GET", f"/repos/{owner}/{repository}/pulls/{number}")
 

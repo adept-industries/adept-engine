@@ -8,7 +8,9 @@ The engine polls and claims durable jobs safely, recovers stale claims, applies 
 
 PR-risk inference uses only the approved `jitfine-expert-pr-risk-mvp-v1` artifact and the frozen `ns, nd, nf, entropy, la, ld, fix` order. Open-PR webhook updates and repository backfills collect complete GitHub file and commit membership, persist `jitfine-pr-features-v1`, and atomically upsert one model-version prediction. Runtime file scope is all files returned by GitHub; the persisted feature payload and model metadata document the known training/runtime limitation. The score is review-prioritization support, not proof of a defect.
 
-The API's Flyway migrations exclusively own the schema. The engine supports schema versions 7 through 14 during the forward-compatible rollout and must not add Alembic or create tables.
+Project issue ingestion is isolated from DORA and PR-risk recalculation. GitHub `issues` webhooks maintain live state, while issue-only repository jobs backfill every open issue and exclude pull requests returned by GitHub's Issues API. Jira issue-only jobs page through unresolved issues for the explicitly mapped, tracked Jira projects. Completed syncs close or resolve stale local rows that are no longer returned by the providers.
+
+The API's Flyway migrations exclusively own the schema. The engine supports schema versions 7 through 15 during the forward-compatible rollout and must not add Alembic or create tables.
 
 ## Install
 
@@ -36,7 +38,7 @@ uv run python -m app.worker
 ```
 
 - `GET /health` checks only process liveness.
-- `GET /ready` requires PostgreSQL and a supported Flyway V7–V13 schema.
+- `GET /ready` requires PostgreSQL and a supported Flyway V7–V15 schema.
 
 ## Quality checks
 

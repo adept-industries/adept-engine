@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
 import structlog
 from sqlalchemy import Engine, text
@@ -16,6 +17,7 @@ from app.jobs.handlers.provider_support import (
     provider_exception_as_job_error,
 )
 from app.jobs.retry import PermanentJobError, requeue_with_payload
+from app.normalization.jira_issues import upsert_jira_issue
 from app.providers.jira import JiraClient
 
 logger = structlog.get_logger()
@@ -24,6 +26,9 @@ logger = structlog.get_logger()
 def handle_sync_jira_projects(database_engine: Engine, job: ClaimedJob, worker_id: str) -> None:
     workspace_id = parse_uuid(job.payload.get("workspaceId"), "workspaceId")
     integration_id = parse_uuid(job.payload.get("jiraIntegrationId"), "jiraIntegrationId")
+    if job.payload.get("issuesOnly") is True:
+        _handle_issue_sync(database_engine, job, worker_id, workspace_id, integration_id)
+        return
     start_at = _non_negative_int(job.payload.get("cursor", 0), "cursor")
     sync_started_at = _sync_started_at(job.payload.get("syncStartedAt"))
     integration = load_jira_integration(database_engine, integration_id, workspace_id)
@@ -112,6 +117,189 @@ def handle_sync_jira_projects(database_engine: Engine, job: ClaimedJob, worker_i
         )
 
     bound_logger.info("sync_jira_projects_completed", project_count=len(result.items))
+
+
+def _handle_issue_sync(
+    database_engine: Engine,
+    job: ClaimedJob,
+    worker_id: str,
+    workspace_id: UUID,
+    integration_id: UUID,
+) -> None:
+    project_ids = _project_ids(job.payload.get("jiraProjectIds"))
+    cursor = _issue_cursor(job.payload.get("cursor"))
+    sync_started_at = _sync_started_at(job.payload.get("syncStartedAt"))
+    projects = _load_tracked_projects(
+        database_engine,
+        workspace_id,
+        integration_id,
+        project_ids,
+    )
+    if not projects or cursor["projectIndex"] >= len(projects):
+        logger.info(
+            "sync_jira_issues_completed",
+            job_id=str(job.id),
+            jira_integration_id=str(integration_id),
+            project_count=len(projects),
+        )
+        return
+
+    project_index = cursor["projectIndex"]
+    project = projects[project_index]
+    integration = load_jira_integration(database_engine, integration_id, workspace_id)
+    settings = get_settings()
+    bound_logger = logger.bind(
+        job_id=str(job.id),
+        workspace_id=str(workspace_id),
+        jira_integration_id=str(integration_id),
+        jira_project_id=str(project["id"]),
+        project_index=project_index,
+    )
+    bound_logger.info("sync_jira_issues_page_started")
+
+    try:
+        access_token, integration = get_valid_jira_access_token(
+            database_engine, integration, settings
+        )
+        with JiraClient(settings, integration.cloud_id, access_token) as client:
+            result = client.list_unresolved_issues(
+                str(project["project_key"]),
+                cursor["nextPageToken"],
+            )
+    except Exception as exc:
+        converted = provider_exception_as_job_error(exc)
+        if isinstance(converted, PermanentJobError) or job.attempts >= job.max_attempts:
+            mark_jira_integration_error(database_engine, integration_id)
+        if converted is exc:
+            raise
+        raise converted from exc
+
+    for issue in result.items:
+        upsert_jira_issue(
+            database_engine,
+            workspace_id,
+            project["id"],
+            issue,
+        )
+
+    if result.next_page_token is not None:
+        next_cursor = {
+            "projectIndex": project_index,
+            "nextPageToken": result.next_page_token,
+        }
+    else:
+        _close_missing_jira_issues(
+            database_engine,
+            workspace_id,
+            project["id"],
+            sync_started_at,
+        )
+        next_cursor = {
+            "projectIndex": project_index + 1,
+            "nextPageToken": None,
+        }
+
+    if next_cursor["projectIndex"] < len(projects):
+        bound_logger.info(
+            "sync_jira_issues_page_completed",
+            issue_count=len(result.items),
+            next_cursor=next_cursor,
+        )
+        requeue_with_payload(
+            database_engine,
+            job.id,
+            worker_id,
+            {
+                **job.payload,
+                "cursor": next_cursor,
+                "syncStartedAt": sync_started_at.isoformat(),
+            },
+        )
+
+    bound_logger.info(
+        "sync_jira_issues_completed",
+        issue_count=len(result.items),
+        project_count=len(projects),
+    )
+
+
+def _project_ids(value: object) -> list[UUID]:
+    if not isinstance(value, list) or not value or len(value) > 500:
+        raise PermanentJobError("Invalid jiraProjectIds")
+    parsed = [parse_uuid(item, "jiraProjectIds") for item in value]
+    return list(dict.fromkeys(parsed))
+
+
+def _issue_cursor(value: object) -> dict[str, Any]:
+    if value is None:
+        return {"projectIndex": 0, "nextPageToken": None}
+    if not isinstance(value, dict):
+        raise PermanentJobError("Invalid Jira issue sync cursor")
+    project_index = _non_negative_int(value.get("projectIndex"), "projectIndex")
+    token = value.get("nextPageToken")
+    if token is not None and (not isinstance(token, str) or not token or len(token) > 4_096):
+        raise PermanentJobError("Invalid Jira issue sync nextPageToken")
+    return {"projectIndex": project_index, "nextPageToken": token}
+
+
+def _load_tracked_projects(
+    database_engine: Engine,
+    workspace_id: UUID,
+    integration_id: UUID,
+    requested_ids: list[UUID],
+) -> list[dict[str, Any]]:
+    with database_engine.connect() as connection:
+        rows = (
+            connection.execute(
+                text(
+                    """
+                    SELECT id, project_key
+                    FROM jira_projects
+                    WHERE workspace_id = :workspace_id
+                      AND jira_integration_id = :integration_id
+                      AND tracking_enabled = true
+                      AND id = ANY(cast(:project_ids as uuid[]))
+                    """
+                ),
+                {
+                    "workspace_id": workspace_id,
+                    "integration_id": integration_id,
+                    "project_ids": [str(value) for value in requested_ids],
+                },
+            )
+            .mappings()
+            .all()
+        )
+    by_id = {row["id"]: dict(row) for row in rows}
+    return [by_id[value] for value in requested_ids if value in by_id]
+
+
+def _close_missing_jira_issues(
+    database_engine: Engine,
+    workspace_id: UUID,
+    project_id: UUID,
+    sync_started_at: datetime,
+) -> None:
+    with database_engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                UPDATE jira_issues
+                SET resolved_at = COALESCE(resolved_at, :sync_started_at),
+                    updated_at = now(),
+                    version = version + 1
+                WHERE workspace_id = :workspace_id
+                  AND jira_project_id = :jira_project_id
+                  AND resolved_at IS NULL
+                  AND updated_at < :sync_started_at
+                """
+            ),
+            {
+                "workspace_id": workspace_id,
+                "jira_project_id": project_id,
+                "sync_started_at": sync_started_at,
+            },
+        )
 
 
 def _upsert_jira_project(
