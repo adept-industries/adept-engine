@@ -121,6 +121,59 @@ def test_github_workflow_backfill_can_query_all_branches() -> None:
     assert "branch" not in requests[1].url.params
 
 
+def test_github_deployment_backfill_finds_success_behind_inactive_status() -> None:
+    requested_pages: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/access_tokens"):
+            return httpx.Response(201, json={"token": "installation-token"})
+        assert request.url.path == ("/repos/adept-industries/adept-api/deployments/42/statuses")
+        requested_pages.append(request.url.params["page"])
+        return httpx.Response(
+            200,
+            json=[
+                {"id": 2, "state": "inactive"},
+                {"id": 1, "state": "success", "updated_at": "2026-08-30T10:00:00Z"},
+            ],
+        )
+
+    http_client = httpx.Client(
+        base_url="https://api.github.com", transport=httpx.MockTransport(handler)
+    )
+    with GithubClient(_github_settings(), 99, http_client=http_client) as client:
+        status = client.terminal_deployment_status("adept-industries", "adept-api", 42)
+
+    assert status is not None
+    assert status["state"] == "success"
+    assert requested_pages == ["1"]
+
+
+def test_github_deployment_backfill_pages_until_terminal_status() -> None:
+    requested_pages: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/access_tokens"):
+            return httpx.Response(201, json={"token": "installation-token"})
+        page = request.url.params["page"]
+        requested_pages.append(page)
+        if page == "1":
+            return httpx.Response(
+                200,
+                json=[{"id": number, "state": "inactive"} for number in range(2)],
+            )
+        return httpx.Response(200, json=[{"id": 1, "state": "failure"}])
+
+    http_client = httpx.Client(
+        base_url="https://api.github.com", transport=httpx.MockTransport(handler)
+    )
+    with GithubClient(_github_settings(), 99, http_client=http_client) as client:
+        status = client.terminal_deployment_status("adept-industries", "adept-api", 42, per_page=2)
+
+    assert status is not None
+    assert status["state"] == "failure"
+    assert requested_pages == ["1", "2"]
+
+
 def test_github_client_collects_all_pull_request_file_pages() -> None:
     file_pages: list[str] = []
 
