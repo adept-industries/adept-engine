@@ -1,0 +1,37 @@
+{
+  "featureOrder": [
+    "ns",
+    "nd",
+    "nf",
+    "entropy",
+    "la",
+    "ld",
+    "fix"
+  ],
+  "featureSchemaVersion": "jitfine-pr-features-v1",
+  "joblibVersion": "1.5.3",
+  "limitations": [
+    "The training records are commit-level while runtime predictions aggregate a whole pull request.",
+    "Training projects and languages may differ from repositories analysed by Adept.",
+    "The score ranks estimated review risk and does not prove that a defect exists.",
+    "The prepared dataset FIX field is used for training; runtime keyword matching is an MVP approximation.",
+    "The prepared change metrics exclude some non-source files; the later runtime extractor must make and document a file-scope decision before claiming training/runtime parity."
+  ],
+  "modelName": "jitfine-expert-pr-risk-mvp",
+  "modelVersion": "jitfine-expert-pr-risk-mvp-v1",
+  "numpyVersion": "2.5.1",
+  "pythonVersion": "3.14.7",
+  "runtimePredictionUnit": "pull_request_aggregate",
+  "scikitLearnVersion": "1.9.0",
+  "sha256": {
+    "model.joblib": "81f4c9f502c251375ae7969b484a7ec304415d16d9f6109deb08b8f403341c3f",
+    "training-report.json": "06b1434f72d6f8ad97818063d338355d5914d9691a403583afce892edb589f07"
+  },
+  "thresholds": {
+    "critical": 0.36333333333333334,
+    "high": 0.17,
+    "medium": 0.08666666666666667
+  },
+  "trainingDataset": "JIT-Fine replication package data.zip",
+  "trainingUnit": "commit"
+}
