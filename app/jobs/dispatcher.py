@@ -4,6 +4,7 @@ from sqlalchemy import Engine
 from app.db.models import ClaimedJob
 from app.jobs.handlers.backfill_repository import handle_backfill_repository
 from app.jobs.handlers.delete_workspace import handle_delete_workspace
+from app.jobs.handlers.evaluate_alerts import handle_evaluate_alerts
 from app.jobs.handlers.github_event import handle_process_github_event
 from app.jobs.handlers.jira_event import handle_process_jira_event
 from app.jobs.handlers.recalculate_metrics import handle_recalculate_metrics
@@ -25,6 +26,7 @@ HANDLERS = {
     "RENEW_JIRA_WEBHOOK": handle_renew_jira_webhook,
     "DELETE_WORKSPACE": handle_delete_workspace,
     "RECALCULATE_METRICS": handle_recalculate_metrics,
+    "EVALUATE_ALERTS": handle_evaluate_alerts,
 }
 
 

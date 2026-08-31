@@ -403,6 +403,16 @@ def recalculate_repository_metrics(
     upserted_count = _upsert_snapshots(
         database_engine, workspace_id, repository_id, snapshots_to_upsert
     )
+    if upserted_count > 0:
+        with database_engine.begin() as connection:
+            from app.jobs.handlers.evaluate_alerts import enqueue_evaluate_alerts_job
+
+            enqueue_evaluate_alerts_job(
+                connection,
+                workspace_id=workspace_id,
+                repository_id=repository_id,
+                trigger_source="METRIC_SNAPSHOT",
+            )
     logger.info(
         "metrics_recalculated",
         workspace_id=str(workspace_id),

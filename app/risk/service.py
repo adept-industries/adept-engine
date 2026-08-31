@@ -123,6 +123,15 @@ def calculate_and_persist_pull_request_risk(
             },
         )
 
+        from app.jobs.handlers.evaluate_alerts import enqueue_evaluate_alerts_job
+
+        enqueue_evaluate_alerts_job(
+            connection,
+            workspace_id=workspace_id,
+            repository_id=repository_id,
+            trigger_source="RISK_PREDICTION",
+        )
+
 
 def _feature_payload(features: PullRequestRiskFeatures) -> dict[str, Any]:
     return {
