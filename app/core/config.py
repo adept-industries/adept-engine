@@ -37,6 +37,13 @@ class Settings(BaseSettings):
     app_integration_encryption_active_key_version: int = Field(default=1, ge=1)
     app_integration_encryption_key_v1_base64: SecretStr = SecretStr("")
 
+    smtp_host: str = "localhost"
+    smtp_port: int = Field(default=1025, ge=1, le=65535)
+    smtp_username: str = ""
+    smtp_password: SecretStr = SecretStr("")
+    app_email_from: str = "Adept <no-reply@adept.local>"
+    app_frontend_base_url: str = "http://localhost:5173"
+
     @property
     def database_url(self) -> URL:
         return URL.create(
