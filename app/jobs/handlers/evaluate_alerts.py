@@ -294,7 +294,7 @@ def handle_evaluate_alerts(
                         WHERE repository_id = :repository_id
                           AND metric_type = :metric_type
                           AND granularity = :granularity
-                        ORDER BY period_start DESC, calculated_at DESC
+                        ORDER BY (sample_size > 0) DESC, period_start DESC, calculated_at DESC
                         LIMIT 1
                         """
                         ),
@@ -318,7 +318,7 @@ def handle_evaluate_alerts(
                             FROM metric_snapshots
                             WHERE repository_id = :repository_id
                               AND metric_type = :metric_type
-                            ORDER BY period_start DESC, calculated_at DESC
+                            ORDER BY (sample_size > 0) DESC, period_start DESC, calculated_at DESC
                             LIMIT 1
                             """
                             ),
