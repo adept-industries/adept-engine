@@ -376,7 +376,28 @@ def handle_evaluate_alerts(
                 continue
 
         event_key = f"{rule_id}:{source_entity_id}"
+
+        # Build email content before persisting delivery so payload stores pre-rendered content
+        subject, text_content, html_content = _build_email_content(
+            rule_name=rule_name,
+            metric_type=metric_type,
+            comparator=comparator,
+            actual=actual_value,
+            threshold=threshold_value,
+            evaluation_window_minutes=evaluation_window_minutes,
+            period_start=period_start_str,
+            period_end=period_end_str,
+            workspace_name=workspace_name,
+            workspace_slug=workspace_slug,
+            repo_full_name=repo_full_name,
+            repository_id=repository_id,
+            settings=settings,
+        )
+
         delivery_payload = {
+            "subject": subject,
+            "text": text_content,
+            "html": html_content,
             "rule_id": str(rule_id),
             "rule_name": rule_name,
             "metric_type": metric_type,
@@ -466,22 +487,9 @@ def handle_evaluate_alerts(
             continue
 
         # Step 6: Send email and update delivery status
-        subject, text_content, html_content = _build_email_content(
-            rule_name=rule_name,
-            metric_type=metric_type,
-            comparator=comparator,
-            actual=actual_value,
-            threshold=threshold_value,
-            evaluation_window_minutes=evaluation_window_minutes,
-            period_start=period_start_str,
-            period_end=period_end_str,
-            workspace_name=workspace_name,
-            workspace_slug=workspace_slug,
-            repo_full_name=repo_full_name,
-            repository_id=repository_id,
-            settings=settings,
-        )
-
+        # If engine worker has SMTP available, dispatch immediately.
+        # If SMTP fails or worker has no SMTP host, leave as PENDING
+        # so adept-api dispatches via production mailer.
         try:
             send_email(
                 to_address=destination,
@@ -511,20 +519,9 @@ def handle_evaluate_alerts(
             )
         except Exception as exc:
             error_msg = str(exc)
-            logger.error("alert_notification_failed", delivery_id=str(delivery_id), error=error_msg)
-            with database_engine.begin() as connection:
-                connection.execute(
-                    text(
-                        """
-                        UPDATE notification_deliveries
-                        SET attempts = attempts + 1,
-                            status = CASE WHEN attempts + 1 >= 5 THEN 'DEAD' ELSE 'FAILED' END,
-                            last_error = :error_msg,
-                            updated_at = now(),
-                            version = version + 1
-                        WHERE id = :delivery_id
-                        """
-                    ),
-                    {"delivery_id": delivery_id, "error_msg": error_msg},
-                )
-            raise
+            logger.warning(
+                "alert_notification_direct_send_deferred",
+                delivery_id=str(delivery_id),
+                error=error_msg,
+                detail="Delivery left PENDING for adept-api mailer dispatch",
+            )
