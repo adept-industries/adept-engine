@@ -32,7 +32,7 @@ def send_email(
 
     msg = EmailMessage()
     msg["Subject"] = subject
-    msg["From"] = cfg.app_email_from.strip('"\'')
+    msg["From"] = cfg.app_email_from.strip("\"'")
     msg["To"] = to_address
     msg.set_content(text_content)
 

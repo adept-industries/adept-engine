@@ -102,14 +102,15 @@ def test_send_email_starttls_port_587() -> None:
 
 
 def test_settings_spring_mail_aliases() -> None:
-    settings = Settings.model_validate({
-        "spring_mail_host": "smtp.gmail.com",
-        "spring_mail_port": 587,
-        "spring_mail_username": "user@gmail.com",
-        "spring_mail_password": "secret_password",
-    })
+    settings = Settings.model_validate(
+        {
+            "spring_mail_host": "smtp.gmail.com",
+            "spring_mail_port": 587,
+            "spring_mail_username": "user@gmail.com",
+            "spring_mail_password": "secret_password",
+        }
+    )
     assert settings.smtp_host == "smtp.gmail.com"
     assert settings.smtp_port == 587
     assert settings.smtp_username == "user@gmail.com"
     assert settings.smtp_password.get_secret_value() == "secret_password"
-
