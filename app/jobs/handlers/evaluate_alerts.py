@@ -338,6 +338,13 @@ def handle_evaluate_alerts(
                     period_end_str = str(snap["period_end"])
 
         if actual_value is None or source_entity_id is None:
+            logger.info(
+                "alert_rule_skipped_no_data",
+                rule_id=str(rule_id),
+                rule_name=rule_name,
+                metric_type=metric_type,
+                repository_id=str(repository_id),
+            )
             continue
 
         # Check comparator match
@@ -348,6 +355,15 @@ def handle_evaluate_alerts(
             continue
 
         if not is_match:
+            logger.info(
+                "alert_rule_condition_not_met",
+                rule_id=str(rule_id),
+                rule_name=rule_name,
+                metric_type=metric_type,
+                comparator=comparator,
+                actual_value=str(actual_value),
+                threshold_value=str(threshold_value),
+            )
             continue
 
         # Check cooldown: suppress if now < last_triggered_at + cooldown_minutes
