@@ -1,6 +1,7 @@
-from datetime import UTC, datetime
+import json
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
@@ -8,6 +9,7 @@ from sqlalchemy import Engine, text
 
 from app.db.models import ClaimedJob
 from app.jobs.handlers.evaluate_alerts import (
+    aggregate_dora_metric,
     enqueue_evaluate_alerts_job,
     handle_evaluate_alerts,
     matches,
@@ -96,12 +98,98 @@ def test_enqueue_evaluate_alerts_job_deduplication() -> None:
     mock_conn.execute.assert_called_once()
 
 
+def test_aggregate_dora_metric_filters_window_and_deduplicates_observations() -> None:
+    snapshot_id = uuid4()
+    window_end = datetime(2026, 9, 1, 12, tzinfo=UTC)
+    window_start = window_end - timedelta(days=1)
+    snapshots = [
+        {
+            "id": snapshot_id,
+            "period_start": window_start,
+            "calculated_at": window_end,
+            "dimensions": {
+                "observations": [
+                    {
+                        "key": "deploy-1",
+                        "at": (window_start + timedelta(hours=1)).isoformat(),
+                        "value": 1,
+                    },
+                    {
+                        "key": "deploy-2",
+                        "at": (window_start + timedelta(hours=2)).isoformat(),
+                        "value": 0,
+                    },
+                    {
+                        "key": "deploy-2",
+                        "at": (window_start + timedelta(hours=2)).isoformat(),
+                        "value": 1,
+                    },
+                    {
+                        "key": "too-old",
+                        "at": (window_start - timedelta(seconds=1)).isoformat(),
+                        "value": 1,
+                    },
+                ]
+            },
+        }
+    ]
+
+    result = aggregate_dora_metric(
+        "CHANGE_FAILURE_RATE_PERCENT", snapshots, window_start, window_end
+    )
+
+    assert result is not None
+    assert result.actual == Decimal("50")
+    assert result.observation_count == 2
+    assert result.source_entity_id == snapshot_id
+    assert result.period_start == window_start
+    assert result.period_end == window_end
+
+
+def test_aggregate_dora_metric_uses_median_and_handles_no_deployments() -> None:
+    snapshot_id = uuid4()
+    window_end = datetime(2026, 9, 1, 12, tzinfo=UTC)
+    window_start = window_end - timedelta(days=1)
+    snapshot = {
+        "id": snapshot_id,
+        "period_start": window_start,
+        "calculated_at": window_end,
+        "dimensions": {
+            "observations": [
+                {
+                    "key": "lead-1",
+                    "at": (window_start + timedelta(hours=1)).isoformat(),
+                    "value": "1.5",
+                },
+                {
+                    "key": "lead-2",
+                    "at": (window_start + timedelta(hours=2)).isoformat(),
+                    "value": "4.5",
+                },
+            ]
+        },
+    }
+
+    duration = aggregate_dora_metric("CHANGE_LEAD_TIME_HOURS", [snapshot], window_start, window_end)
+    no_deployments = aggregate_dora_metric(
+        "DEPLOYMENT_FREQUENCY",
+        [{**snapshot, "dimensions": {"observations": []}}],
+        window_start,
+        window_end,
+    )
+
+    assert duration is not None
+    assert duration.actual == Decimal("3.0")
+    assert no_deployments is not None
+    assert no_deployments.actual == Decimal("0")
+    assert no_deployments.observation_count == 0
+
+
 def test_build_email_content() -> None:
     from app.core.config import Settings
     from app.jobs.handlers.evaluate_alerts import _build_email_content
 
     settings = Settings(app_frontend_base_url="http://localhost:5173")
-    repo_id = uuid4()
     subject, plain, html = _build_email_content(
         rule_name="DORA Change Failure",
         metric_type="CHANGE_FAILURE_RATE_PERCENT",
@@ -112,19 +200,42 @@ def test_build_email_content() -> None:
         period_start="2026-08-30T00:00:00Z",
         period_end="2026-08-31T00:00:00Z",
         workspace_name="Adept Corp",
-        workspace_slug="adept-corp",
         repo_full_name="adept-corp/main-repo",
-        repository_id=repo_id,
         settings=settings,
     )
     assert subject == "[Adept Alert] DORA Change Failure triggered for adept-corp/main-repo"
     assert "Condition: GT 15.0" in plain
     assert "Actual Value: 25.0" in plain
-    assert f"http://localhost:5173/workspaces/adept-corp/analytics?repo={repo_id}" in plain
-    assert f"http://localhost:5173/workspaces/adept-corp/analytics?repo={repo_id}" in html
+    assert "http://localhost:5173/dashboard" in plain
+    assert "http://localhost:5173/dashboard" in html
     # Invariant: Must not contain diffs
     assert "diff --git" not in plain
     assert "diff --git" not in html
+
+
+def test_build_email_content_sanitizes_headers_and_escapes_html() -> None:
+    from app.core.config import Settings
+    from app.jobs.handlers.evaluate_alerts import _build_email_content
+
+    subject, _, html = _build_email_content(
+        rule_name="High risk\nBcc: attacker@example.test <script>",
+        metric_type="PR_RISK_SCORE",
+        comparator="GT",
+        actual=Decimal("0.8"),
+        threshold=Decimal("0.5"),
+        evaluation_window_minutes=60,
+        period_start=None,
+        period_end=None,
+        workspace_name="<script>alert(1)</script>",
+        repo_full_name="org/<b>repo</b>",
+        settings=Settings(app_frontend_base_url="https://adept.example/"),
+    )
+
+    assert "\n" not in subject
+    assert "\r" not in subject
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "org/&lt;b&gt;repo&lt;/b&gt;" in html
+    assert "https://adept.example/dashboard" in html
 
 
 @pytest.mark.integration
@@ -141,6 +252,15 @@ def test_evaluate_alerts_integration_end_to_end(
     integ_id = uuid4()
     rule_id = uuid4()
     snapshot_id = uuid4()
+    observed_at = datetime.now(UTC) - timedelta(minutes=30)
+    observations = [
+        {
+            "key": f"deployment-{index}",
+            "at": (observed_at + timedelta(seconds=index)).isoformat(),
+            "value": 1 if index == 0 else 0,
+        }
+        for index in range(4)
+    ]
 
     with database_engine.begin() as conn:
         # Create user & workspace
@@ -209,32 +329,36 @@ def test_evaluate_alerts_integration_end_to_end(
                 INSERT INTO metric_snapshots (
                     id, workspace_id, repository_id, metric_type, granularity,
                     period_start, period_end, value, unit, sample_size,
-                    calculation_version
+                    calculation_version, dimensions
                 ) VALUES (
                     :id, :ws_id, :repo_id, 'CHANGE_FAILURE_RATE_PERCENT', 'DAY',
-                    now() - interval '1 day', now(), 25.0, 'percent', 10, '1.0.0'
+                    :period_start, :period_end, 25.0, 'percent', 4,
+                    'dora-v3', CAST(:dimensions AS jsonb)
                 )
                 """
             ),
-            {"id": snapshot_id, "ws_id": ws_id, "repo_id": repo_id},
+            {
+                "id": snapshot_id,
+                "ws_id": ws_id,
+                "repo_id": repo_id,
+                "period_start": observed_at.replace(hour=0, minute=0, second=0, microsecond=0),
+                "period_end": observed_at.replace(hour=0, minute=0, second=0, microsecond=0)
+                + timedelta(days=1),
+                "dimensions": json.dumps({"observations": observations}),
+            },
         )
 
     # Queue an EVALUATE_ALERTS job
-    job_factory.insert(
+    evaluation_job_id = job_factory.insert(
         job_type="EVALUATE_ALERTS",
         payload={"workspace_id": str(ws_id), "repository_id": str(repo_id)},
     )
 
-    with patch("app.jobs.handlers.evaluate_alerts.send_email") as mock_send_email:
-        jobs = claim_jobs(database_engine, "test-alert-worker", 1)
-        assert len(jobs) == 1
-        dispatch_job(database_engine, jobs[0], "test-alert-worker")
+    jobs = claim_jobs(database_engine, "test-alert-worker", 1)
+    assert len(jobs) == 1
+    dispatch_job(database_engine, jobs[0], "test-alert-worker")
 
-        mock_send_email.assert_called_once()
-        assert mock_send_email.call_args.kwargs["to_address"] == "devs@example.test"
-        assert "High CFR Alert" in mock_send_email.call_args.kwargs["subject"]
-
-    # Verify notification_deliveries row created and SENT
+    # The engine owns evaluation only. adept-api owns SMTP delivery and retries.
     with database_engine.connect() as conn:
         delivery = (
             conn.execute(
@@ -249,10 +373,12 @@ def test_evaluate_alerts_integration_end_to_end(
             .mappings()
             .one()
         )
-        assert delivery["status"] == "SENT"
-        assert delivery["event_key"] == f"{rule_id}:{snapshot_id}"
-        assert delivery["attempts"] == 1
-        assert delivery["sent_at"] is not None
+        assert delivery["status"] == "PENDING"
+        assert delivery["event_key"] == f"evaluation:{evaluation_job_id}"
+        assert delivery["attempts"] == 0
+        assert delivery["sent_at"] is None
+        assert delivery["payload"]["actual_value"] == "25"
+        assert delivery["payload"]["source_observation_count"] == 4
 
         # Verify alert_rule last_triggered_at was updated
         rule_row = (
@@ -264,6 +390,21 @@ def test_evaluate_alerts_integration_end_to_end(
             .one()
         )
         assert rule_row["last_triggered_at"] is not None
+
+    # A separate evaluation inside the cooldown window cannot create a second delivery.
+    job_factory.insert(
+        job_type="EVALUATE_ALERTS",
+        payload={"workspace_id": str(ws_id), "repository_id": str(repo_id)},
+    )
+    cooldown_jobs = claim_jobs(database_engine, "test-alert-worker", 1)
+    assert len(cooldown_jobs) == 1
+    dispatch_job(database_engine, cooldown_jobs[0], "test-alert-worker")
+    with database_engine.connect() as conn:
+        delivery_count = conn.execute(
+            text("SELECT count(*) FROM notification_deliveries WHERE alert_rule_id = :rule_id"),
+            {"rule_id": rule_id},
+        ).scalar_one()
+    assert delivery_count == 1
 
     # Cleanup
     with database_engine.begin() as conn:
