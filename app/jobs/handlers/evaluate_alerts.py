@@ -17,7 +17,6 @@ from sqlalchemy import Connection, Engine, text
 from app.core.config import Settings, get_settings
 from app.db.models import ClaimedJob
 from app.jobs.retry import PermanentJobError
-from app.providers.email import send_email
 
 logger = structlog.get_logger()
 
@@ -338,6 +337,13 @@ def handle_evaluate_alerts(
                     period_end_str = str(snap["period_end"])
 
         if actual_value is None or source_entity_id is None:
+            logger.info(
+                "alert_rule_skipped_no_data",
+                rule_id=str(rule_id),
+                rule_name=rule_name,
+                metric_type=metric_type,
+                repository_id=str(repository_id),
+            )
             continue
 
         # Check comparator match
@@ -348,6 +354,15 @@ def handle_evaluate_alerts(
             continue
 
         if not is_match:
+            logger.info(
+                "alert_rule_condition_not_met",
+                rule_id=str(rule_id),
+                rule_name=rule_name,
+                metric_type=metric_type,
+                comparator=comparator,
+                actual_value=str(actual_value),
+                threshold_value=str(threshold_value),
+            )
             continue
 
         # Check cooldown: suppress if now < last_triggered_at + cooldown_minutes
@@ -486,42 +501,13 @@ def handle_evaluate_alerts(
         if not should_send or delivery_id is None:
             continue
 
-        # Step 6: Send email and update delivery status
-        # If engine worker has SMTP available, dispatch immediately.
-        # If SMTP fails or worker has no SMTP host, leave as PENDING
-        # so adept-api dispatches via production mailer.
-        try:
-            send_email(
-                to_address=destination,
-                subject=subject,
-                text_content=text_content,
-                html_content=html_content,
-                settings=settings,
-            )
-            with database_engine.begin() as connection:
-                connection.execute(
-                    text(
-                        """
-                        UPDATE notification_deliveries
-                        SET status = 'SENT',
-                            sent_at = now(),
-                            attempts = attempts + 1,
-                            last_error = NULL,
-                            updated_at = now(),
-                            version = version + 1
-                        WHERE id = :delivery_id
-                        """
-                    ),
-                    {"delivery_id": delivery_id},
-                )
-            logger.info(
-                "alert_notification_sent", delivery_id=str(delivery_id), destination=destination
-            )
-        except Exception as exc:
-            error_msg = str(exc)
-            logger.warning(
-                "alert_notification_direct_send_deferred",
-                delivery_id=str(delivery_id),
-                error=error_msg,
-                detail="Delivery left PENDING for adept-api mailer dispatch",
-            )
+        # Delivery persisted as PENDING. The adept-api NotificationDeliveryService
+        # polls for PENDING deliveries and sends them through Spring's JavaMailSender,
+        # which shares the same SMTP configuration used for auth emails.
+        logger.info(
+            "alert_delivery_created",
+            delivery_id=str(delivery_id),
+            destination=destination,
+            rule_id=str(rule_id),
+            detail="Delivery queued for adept-api mailer dispatch",
+        )
