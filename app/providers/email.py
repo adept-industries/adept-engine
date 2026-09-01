@@ -32,7 +32,7 @@ def send_email(
 
     msg = EmailMessage()
     msg["Subject"] = subject
-    msg["From"] = cfg.app_email_from
+    msg["From"] = cfg.app_email_from.strip("\"'")
     msg["To"] = to_address
     msg.set_content(text_content)
 
@@ -40,11 +40,17 @@ def send_email(
         msg.add_alternative(html_content, subtype="html")
 
     try:
-        with smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=15) as server:
+        server_cm: smtplib.SMTP = (
+            smtplib.SMTP_SSL(cfg.smtp_host, cfg.smtp_port, timeout=15)
+            if cfg.smtp_port == 465
+            else smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=15)
+        )
+        with server_cm as server:
             password = cfg.smtp_password.get_secret_value()
             if cfg.smtp_username and password:
-                with contextlib.suppress(smtplib.SMTPNotSupportedError):
-                    server.starttls()
+                if cfg.smtp_port != 465:
+                    with contextlib.suppress(smtplib.SMTPNotSupportedError):
+                        server.starttls()
                 server.login(cfg.smtp_username, password)
             server.send_message(msg)
     except (smtplib.SMTPException, OSError) as exc:
