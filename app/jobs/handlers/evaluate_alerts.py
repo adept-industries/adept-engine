@@ -2,13 +2,18 @@
 Job handler for EVALUATE_ALERTS.
 
 Evaluates enabled alert rules for a repository when new metrics or risk predictions
-are produced, creates deterministic notification deliveries, and dispatches notifications.
+are produced and creates deterministic notification deliveries for the platform mailer.
 """
 
 from __future__ import annotations
 
 import json
-from decimal import Decimal
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
+from html import escape
+from typing import Any
 from uuid import UUID
 
 import structlog
@@ -17,9 +22,110 @@ from sqlalchemy import Connection, Engine, text
 from app.core.config import Settings, get_settings
 from app.db.models import ClaimedJob
 from app.jobs.retry import PermanentJobError
-from app.providers.email import send_email
 
 logger = structlog.get_logger()
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluatedMetric:
+    actual: Decimal
+    source_entity_id: UUID
+    observation_count: int
+    period_start: datetime
+    period_end: datetime
+
+
+def _parse_observation_time(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except TypeError, ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+def _median(values: list[Decimal]) -> Decimal:
+    ordered = sorted(values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return ordered[midpoint]
+    return (ordered[midpoint - 1] + ordered[midpoint]) / Decimal(2)
+
+
+def aggregate_dora_metric(
+    metric_type: str,
+    snapshots: Sequence[Mapping[str, Any]],
+    window_start: datetime,
+    window_end: datetime,
+) -> EvaluatedMetric | None:
+    """Aggregate canonical DORA observations inside an exact rolling window."""
+    if not snapshots:
+        return None
+
+    observations: dict[str, Decimal] = {}
+    for snapshot in snapshots:
+        dimensions = snapshot.get("dimensions")
+        raw_observations = (
+            dimensions.get("observations") if isinstance(dimensions, Mapping) else None
+        )
+        if not isinstance(raw_observations, list):
+            continue
+
+        for index, raw_observation in enumerate(raw_observations):
+            if not isinstance(raw_observation, dict):
+                continue
+            observed_at = _parse_observation_time(raw_observation.get("at"))
+            if observed_at is None or not window_start <= observed_at < window_end:
+                continue
+            try:
+                value = Decimal(str(raw_observation.get("value")))
+            except InvalidOperation, ValueError:
+                continue
+            if not value.is_finite():
+                continue
+            raw_key = raw_observation.get("key")
+            key = str(raw_key).strip() if raw_key is not None else ""
+            if not key:
+                key = f"{snapshot['id']}:{index}"
+            observations.setdefault(key, value)
+
+    values = list(observations.values())
+    if metric_type == "DEPLOYMENT_FREQUENCY":
+        actual = Decimal(len(values))
+    elif metric_type == "CHANGE_FAILURE_RATE_PERCENT":
+        if not values:
+            return None
+        failed = sum(1 for value in values if value >= Decimal("0.5"))
+        actual = Decimal(failed) * Decimal(100) / Decimal(len(values))
+    elif metric_type in {
+        "CHANGE_LEAD_TIME_HOURS",
+        "FAILED_DEPLOYMENT_RECOVERY_TIME_HOURS",
+    }:
+        if not values:
+            return None
+        actual = _median(values)
+    else:
+        return None
+
+    newest_snapshot = max(
+        snapshots,
+        key=lambda snapshot: (
+            snapshot.get("period_start") or window_start,
+            snapshot.get("calculated_at") or window_start,
+        ),
+    )
+    return EvaluatedMetric(
+        actual=actual,
+        source_entity_id=UUID(str(newest_snapshot["id"])),
+        observation_count=len(values),
+        period_start=window_start,
+        period_end=window_end,
+    )
+
+
+def _safe_header(value: str) -> str:
+    return " ".join(value.replace("\r", " ").replace("\n", " ").split())
 
 
 def matches(comparator: str, actual: Decimal, threshold: Decimal) -> bool:
@@ -97,13 +203,13 @@ def _fetch_workspace_and_repo_names(
     connection: Connection,
     workspace_id: UUID,
     repository_id: UUID,
-) -> tuple[str, str, str]:
-    """Returns (workspace_name, workspace_slug, repo_full_name)."""
+) -> tuple[str, str]:
+    """Returns (workspace_name, repo_full_name)."""
     row = (
         connection.execute(
             text(
                 """
-            SELECT w.name AS workspace_name, w.slug AS workspace_slug, r.full_name AS repo_full_name
+            SELECT w.name AS workspace_name, r.full_name AS repo_full_name
             FROM workspaces w
             JOIN repositories r ON r.workspace_id = w.id
             WHERE w.id = :workspace_id AND r.id = :repository_id
@@ -116,8 +222,8 @@ def _fetch_workspace_and_repo_names(
     )
 
     if row is None:
-        return ("Unknown Workspace", str(workspace_id), "Unknown Repository")
-    return (str(row["workspace_name"]), str(row["workspace_slug"]), str(row["repo_full_name"]))
+        return ("Unknown Workspace", "Unknown Repository")
+    return (str(row["workspace_name"]), str(row["repo_full_name"]))
 
 
 def _build_email_content(
@@ -130,19 +236,18 @@ def _build_email_content(
     period_start: str | None,
     period_end: str | None,
     workspace_name: str,
-    workspace_slug: str,
     repo_full_name: str,
-    repository_id: UUID,
     settings: Settings,
 ) -> tuple[str, str, str]:
     """
     Generates (subject, plain_text, html_body) for the alert.
     Safely includes workspace, repository, metric, actual value, threshold,
-    evaluation period, and a link to the filtered dashboard. Does NOT include diffs.
+    evaluation period, and a safe dashboard link. Does NOT include diffs.
     """
-    subject = f"[Adept Alert] {rule_name} triggered for {repo_full_name}"
-    path = f"/workspaces/{workspace_slug}/analytics?repo={repository_id}"
-    dashboard_link = f"{settings.app_frontend_base_url}{path}"
+    subject = (
+        f"[Adept Alert] {_safe_header(rule_name)} triggered for {_safe_header(repo_full_name)}"
+    )
+    dashboard_link = f"{settings.app_frontend_base_url.rstrip('/')}/dashboard"
 
     period_str = f"{evaluation_window_minutes} minutes"
     if period_start and period_end:
@@ -164,14 +269,15 @@ def _build_email_content(
         "text-decoration: none; border-radius: 4px;"
     )
     html_body = (
-        f"<h2>Alert Triggered: {rule_name}</h2>"
-        f"<p><strong>Workspace:</strong> {workspace_name}<br/>"
-        f"<strong>Repository:</strong> {repo_full_name}<br/>"
-        f"<strong>Metric:</strong> {metric_type}<br/>"
-        f"<strong>Condition:</strong> {comparator} {threshold}<br/>"
-        f"<strong>Actual Value:</strong> {actual}<br/>"
-        f"<strong>Evaluation Period:</strong> {period_str}</p>"
-        f'<p><a href="{dashboard_link}" style="{link_style}">View Filtered Dashboard</a></p>'
+        f"<h2>Alert Triggered: {escape(rule_name)}</h2>"
+        f"<p><strong>Workspace:</strong> {escape(workspace_name)}<br/>"
+        f"<strong>Repository:</strong> {escape(repo_full_name)}<br/>"
+        f"<strong>Metric:</strong> {escape(metric_type)}<br/>"
+        f"<strong>Condition:</strong> {escape(comparator)} {escape(str(threshold))}<br/>"
+        f"<strong>Actual Value:</strong> {escape(str(actual))}<br/>"
+        f"<strong>Evaluation Period:</strong> {escape(period_str)}</p>"
+        f'<p><a href="{escape(dashboard_link, quote=True)}" style="{link_style}">'
+        "View Dashboard</a></p>"
     )
 
     return subject, plain_text, html_body
@@ -185,11 +291,10 @@ def handle_evaluate_alerts(
     """
     Processes an EVALUATE_ALERTS job:
     1. Loads enabled rules for the repository.
-    2. Evaluates newest values (metric snapshot or risk prediction).
-    3. Checks cooldown.
-    4. Generates deterministic event_key.
-    5. Inserts notification_deliveries row and updates rule's last_triggered_at.
-    6. Sends email and updates delivery status (retries update existing row).
+    2. Evaluates observations inside each rule's exact rolling window.
+    3. Locks the rule and checks cooldown atomically.
+    4. Inserts one deterministic PENDING delivery per evaluation job.
+    5. Leaves SMTP delivery and retry ownership to adept-api.
     """
     settings = get_settings()
     payload = job.payload or {}
@@ -208,7 +313,7 @@ def handle_evaluate_alerts(
         raise PermanentJobError(f"Invalid UUID in EVALUATE_ALERTS payload: {exc}") from exc
 
     with database_engine.connect() as connection:
-        workspace_name, workspace_slug, repo_full_name = _fetch_workspace_and_repo_names(
+        workspace_name, repo_full_name = _fetch_workspace_and_repo_names(
             connection, workspace_id, repository_id
         )
 
@@ -235,6 +340,8 @@ def handle_evaluate_alerts(
         logger.info("no_enabled_alert_rules", repository_id=str(repository_id))
         return
 
+    evaluation_end = datetime.now(UTC)
+
     for rule in rules:
         rule_id = UUID(str(rule["id"]))
         rule_name = str(rule["name"])
@@ -246,15 +353,12 @@ def handle_evaluate_alerts(
         channel = str(rule["channel"])
         destination = str(rule["destination"])
 
-        # Fetch newest value and source entity ID
-        actual_value: Decimal | None = None
-        source_entity_id: UUID | None = None
-        period_start_str: str | None = None
-        period_end_str: str | None = None
+        evaluation_start = evaluation_end - timedelta(minutes=evaluation_window_minutes)
+        evaluated_metric: EvaluatedMetric | None = None
 
         with database_engine.connect() as connection:
             if metric_type == "PR_RISK_SCORE":
-                # Evaluate newest risk prediction for this repository
+                # A risk rule only evaluates predictions produced inside its rolling window.
                 pred = (
                     connection.execute(
                         text(
@@ -262,82 +366,68 @@ def handle_evaluate_alerts(
                         SELECT id, risk_score, predicted_at
                         FROM risk_predictions
                         WHERE repository_id = :repository_id
+                          AND predicted_at >= :window_start
+                          AND predicted_at < :window_end
                         ORDER BY predicted_at DESC, created_at DESC
-                        LIMIT 1
-                        """
-                        ),
-                        {"repository_id": repository_id},
-                    )
-                    .mappings()
-                    .one_or_none()
-                )
-
-                if pred is not None:
-                    actual_value = Decimal(str(pred["risk_score"]))
-                    source_entity_id = UUID(str(pred["id"]))
-                    period_start_str = str(pred["predicted_at"])
-                    period_end_str = str(pred["predicted_at"])
-            else:
-                # DORA metric: evaluate newest snapshot matching granularity or metric_type
-                # Window <= 1440 min -> DAY, <= 10080 -> WEEK, else MONTH
-                granularity = (
-                    "DAY"
-                    if evaluation_window_minutes <= 1440
-                    else ("WEEK" if evaluation_window_minutes <= 10080 else "MONTH")
-                )
-                snap = (
-                    connection.execute(
-                        text(
-                            """
-                        SELECT id, value, period_start, period_end
-                        FROM metric_snapshots
-                        WHERE repository_id = :repository_id
-                          AND metric_type = :metric_type
-                          AND granularity = :granularity
-                        ORDER BY (sample_size > 0) DESC, period_start DESC, calculated_at DESC
                         LIMIT 1
                         """
                         ),
                         {
                             "repository_id": repository_id,
-                            "metric_type": metric_type,
-                            "granularity": granularity,
+                            "window_start": evaluation_start,
+                            "window_end": evaluation_end,
                         },
                     )
                     .mappings()
                     .one_or_none()
                 )
 
-                # Fallback to newest snapshot of any granularity if preferred not found
-                if snap is None:
-                    snap = (
-                        connection.execute(
-                            text(
-                                """
-                            SELECT id, value, period_start, period_end
-                            FROM metric_snapshots
-                            WHERE repository_id = :repository_id
-                              AND metric_type = :metric_type
-                            ORDER BY (sample_size > 0) DESC, period_start DESC, calculated_at DESC
-                            LIMIT 1
-                            """
-                            ),
-                            {
-                                "repository_id": repository_id,
-                                "metric_type": metric_type,
-                            },
-                        )
-                        .mappings()
-                        .one_or_none()
+                if pred is not None:
+                    evaluated_metric = EvaluatedMetric(
+                        actual=Decimal(str(pred["risk_score"])),
+                        source_entity_id=UUID(str(pred["id"])),
+                        observation_count=1,
+                        period_start=evaluation_start,
+                        period_end=evaluation_end,
                     )
+            else:
+                # DAY snapshots hold the canonical observations used by the dashboard.
+                # Aggregate every overlapping bucket and filter its observations to the
+                # exact rolling window instead of selecting one potentially stale value.
+                snapshots = [
+                    dict(snapshot)
+                    for snapshot in connection.execute(
+                        text(
+                            """
+                        SELECT id, period_start, period_end, dimensions, calculated_at
+                        FROM metric_snapshots
+                        WHERE repository_id = :repository_id
+                          AND metric_type = :metric_type
+                          AND granularity = 'DAY'
+                          AND calculation_version = 'dora-v3'
+                          AND period_end > :window_start
+                          AND period_start < :window_end
+                        ORDER BY period_start ASC, calculated_at ASC
+                        """
+                        ),
+                        {
+                            "repository_id": repository_id,
+                            "metric_type": metric_type,
+                            "window_start": evaluation_start,
+                            "window_end": evaluation_end,
+                        },
+                    )
+                    .mappings()
+                    .all()
+                ]
+                evaluated_metric = aggregate_dora_metric(
+                    metric_type,
+                    snapshots,
+                    evaluation_start,
+                    evaluation_end,
+                )
 
-                if snap is not None:
-                    actual_value = Decimal(str(snap["value"]))
-                    source_entity_id = UUID(str(snap["id"]))
-                    period_start_str = str(snap["period_start"])
-                    period_end_str = str(snap["period_end"])
-
-        if actual_value is None or source_entity_id is None:
+        if evaluated_metric is None:
             logger.info(
                 "alert_rule_skipped_no_data",
                 rule_id=str(rule_id),
@@ -346,6 +436,8 @@ def handle_evaluate_alerts(
                 repository_id=str(repository_id),
             )
             continue
+
+        actual_value = evaluated_metric.actual
 
         # Check comparator match
         try:
@@ -366,32 +458,9 @@ def handle_evaluate_alerts(
             )
             continue
 
-        # Check cooldown: suppress if now < last_triggered_at + cooldown_minutes
-        with database_engine.connect() as connection:
-            cooldown_sql = text(
-                """
-                SELECT (
-                    last_triggered_at IS NOT NULL
-                    AND now() < last_triggered_at + make_interval(mins => :cooldown_mins)
-                ) AS in_cooldown
-                FROM alert_rules
-                WHERE id = :rule_id
-                """
-            )
-            in_cooldown = connection.execute(
-                cooldown_sql,
-                {"rule_id": rule_id, "cooldown_mins": cooldown_minutes},
-            ).scalar_one_or_none()
-
-            if in_cooldown:
-                logger.info(
-                    "alert_suppressed_by_cooldown",
-                    rule_id=str(rule_id),
-                    cooldown_minutes=cooldown_minutes,
-                )
-                continue
-
-        event_key = f"{rule_id}:{source_entity_id}"
+        # A processing job is the qualifying evaluation event. Retries keep the same
+        # job ID; a later observation creates a new job and may notify after cooldown.
+        event_key = f"evaluation:{job.id}"
 
         # Build email content before persisting delivery so payload stores pre-rendered content
         subject, text_content, html_content = _build_email_content(
@@ -401,12 +470,10 @@ def handle_evaluate_alerts(
             actual=actual_value,
             threshold=threshold_value,
             evaluation_window_minutes=evaluation_window_minutes,
-            period_start=period_start_str,
-            period_end=period_end_str,
+            period_start=evaluated_metric.period_start.isoformat(),
+            period_end=evaluated_metric.period_end.isoformat(),
             workspace_name=workspace_name,
-            workspace_slug=workspace_slug,
             repo_full_name=repo_full_name,
-            repository_id=repository_id,
             settings=settings,
         )
 
@@ -420,124 +487,101 @@ def handle_evaluate_alerts(
             "comparator": comparator,
             "threshold_value": str(threshold_value),
             "actual_value": str(actual_value),
-            "source_entity_id": str(source_entity_id),
+            "source_entity_id": str(evaluated_metric.source_entity_id),
+            "source_observation_count": evaluated_metric.observation_count,
+            "evaluation_job_id": str(job.id),
             "evaluation_window_minutes": evaluation_window_minutes,
-            "period_start": period_start_str,
-            "period_end": period_end_str,
+            "period_start": evaluated_metric.period_start.isoformat(),
+            "period_end": evaluated_metric.period_end.isoformat(),
             "workspace_id": str(workspace_id),
             "repository_id": str(repository_id),
         }
 
-        # Step 5 & 7: Insert delivery if absent and set last_triggered_at in same tx
-        delivery_id: UUID | None = None
-        should_send = False
-
+        queued_delivery_id: UUID | None = None
         with database_engine.begin() as connection:
-            # Check existing delivery
-            existing_delivery = (
+            # Serialize the cooldown decision for this rule so concurrent workers cannot
+            # create two deliveries inside one cooldown window.
+            cooldown = (
                 connection.execute(
                     text(
                         """
-                    SELECT id, status, attempts
-                    FROM notification_deliveries
-                    WHERE alert_rule_id = :rule_id
-                      AND event_key = :event_key
-                    FOR UPDATE
-                    """
+                        SELECT (
+                            last_triggered_at IS NOT NULL
+                            AND now() < last_triggered_at + make_interval(mins => :cooldown_mins)
+                        ) AS in_cooldown
+                        FROM alert_rules
+                        WHERE id = :rule_id
+                          AND enabled = true
+                        FOR UPDATE
+                        """
                     ),
-                    {"rule_id": rule_id, "event_key": event_key},
+                    {"rule_id": rule_id, "cooldown_mins": cooldown_minutes},
                 )
                 .mappings()
                 .one_or_none()
             )
-
-            if existing_delivery is None:
-                new_id = connection.execute(
-                    text(
-                        """
-                        INSERT INTO notification_deliveries (
-                            workspace_id, repository_id, alert_rule_id, event_key,
-                            channel, destination, status, payload, attempts,
-                            created_at, updated_at
-                        ) VALUES (
-                            :workspace_id, :repository_id, :rule_id, :event_key,
-                            :channel, :destination, 'PENDING', CAST(:payload AS jsonb), 0,
-                            now(), now()
-                        )
-                        RETURNING id
-                        """
-                    ),
-                    {
-                        "workspace_id": workspace_id,
-                        "repository_id": repository_id,
-                        "rule_id": rule_id,
-                        "event_key": event_key,
-                        "channel": channel,
-                        "destination": destination,
-                        "payload": json.dumps(delivery_payload),
-                    },
-                ).scalar_one()
-
-                # Set last_triggered_at on alert_rule in same transaction
-                connection.execute(
-                    text(
-                        """
-                        UPDATE alert_rules
-                        SET last_triggered_at = now(),
-                            updated_at = now(),
-                            version = version + 1
-                        WHERE id = :rule_id
-                        """
-                    ),
-                    {"rule_id": rule_id},
+            if cooldown is None:
+                continue
+            if bool(cooldown["in_cooldown"]):
+                logger.info(
+                    "alert_suppressed_by_cooldown",
+                    rule_id=str(rule_id),
+                    cooldown_minutes=cooldown_minutes,
                 )
-                delivery_id = UUID(str(new_id))
-                should_send = True
-            else:
-                delivery_id = UUID(str(existing_delivery["id"]))
-                curr_status = str(existing_delivery["status"])
-                if curr_status in ("PENDING", "FAILED"):
-                    should_send = True
+                continue
 
-        if not should_send or delivery_id is None:
-            continue
+            new_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO notification_deliveries (
+                        workspace_id, repository_id, alert_rule_id, event_key,
+                        channel, destination, status, payload, attempts,
+                        created_at, updated_at
+                    ) VALUES (
+                        :workspace_id, :repository_id, :rule_id, :event_key,
+                        :channel, :destination, 'PENDING', CAST(:payload AS jsonb), 0,
+                        now(), now()
+                    )
+                    ON CONFLICT (alert_rule_id, event_key) DO NOTHING
+                    RETURNING id
+                    """
+                ),
+                {
+                    "workspace_id": workspace_id,
+                    "repository_id": repository_id,
+                    "rule_id": rule_id,
+                    "event_key": event_key,
+                    "channel": channel,
+                    "destination": destination,
+                    "payload": json.dumps(delivery_payload),
+                },
+            ).scalar_one_or_none()
+            if new_id is None:
+                logger.info(
+                    "alert_delivery_event_already_queued",
+                    rule_id=str(rule_id),
+                    event_key=event_key,
+                )
+                continue
 
-        # Step 6: Send email and update delivery status
-        # If engine worker has SMTP available, dispatch immediately.
-        # If SMTP fails or worker has no SMTP host, leave as PENDING
-        # so adept-api dispatches via production mailer.
-        try:
-            send_email(
-                to_address=destination,
-                subject=subject,
-                text_content=text_content,
-                html_content=html_content,
-                settings=settings,
+            connection.execute(
+                text(
+                    """
+                    UPDATE alert_rules
+                    SET last_triggered_at = now(),
+                        updated_at = now(),
+                        version = version + 1
+                    WHERE id = :rule_id
+                    """
+                ),
+                {"rule_id": rule_id},
             )
-            with database_engine.begin() as connection:
-                connection.execute(
-                    text(
-                        """
-                        UPDATE notification_deliveries
-                        SET status = 'SENT',
-                            sent_at = now(),
-                            attempts = attempts + 1,
-                            last_error = NULL,
-                            updated_at = now(),
-                            version = version + 1
-                        WHERE id = :delivery_id
-                        """
-                    ),
-                    {"delivery_id": delivery_id},
-                )
+            queued_delivery_id = UUID(str(new_id))
+
+        if queued_delivery_id is not None:
             logger.info(
-                "alert_notification_sent", delivery_id=str(delivery_id), destination=destination
-            )
-        except Exception as exc:
-            error_msg = str(exc)
-            logger.warning(
-                "alert_notification_direct_send_deferred",
-                delivery_id=str(delivery_id),
-                error=error_msg,
-                detail="Delivery left PENDING for adept-api mailer dispatch",
+                "alert_notification_queued",
+                delivery_id=str(queued_delivery_id),
+                rule_id=str(rule_id),
+                event_key=event_key,
             )
