@@ -40,10 +40,11 @@ def send_email(
         msg.add_alternative(html_content, subtype="html")
 
     try:
-        if cfg.smtp_port == 465:
-            server_cm = smtplib.SMTP_SSL(cfg.smtp_host, cfg.smtp_port, timeout=15)
-        else:
-            server_cm = smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=15)
+        server_cm: smtplib.SMTP = (
+            smtplib.SMTP_SSL(cfg.smtp_host, cfg.smtp_port, timeout=15)
+            if cfg.smtp_port == 465
+            else smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=15)
+        )
         with server_cm as server:
             password = cfg.smtp_password.get_secret_value()
             if cfg.smtp_username and password:

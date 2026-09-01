@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import SecretStr
 
 from app.core.config import Settings
 from app.providers import ProviderError
@@ -54,7 +55,7 @@ def test_send_email_ssl_port_465() -> None:
         smtp_host="smtp.gmail.com",
         smtp_port=465,
         smtp_username="user@example.com",
-        smtp_password="password",
+        smtp_password=SecretStr("password"),
         app_email_from="Adept <test@adept.local>",
     )
     with patch("smtplib.SMTP_SSL") as mock_smtp_ssl:
