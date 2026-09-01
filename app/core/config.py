@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL
 
@@ -37,10 +37,24 @@ class Settings(BaseSettings):
     app_integration_encryption_active_key_version: int = Field(default=1, ge=1)
     app_integration_encryption_key_v1_base64: SecretStr = SecretStr("")
 
-    smtp_host: str = "localhost"
-    smtp_port: int = Field(default=1025, ge=1, le=65535)
-    smtp_username: str = ""
-    smtp_password: SecretStr = SecretStr("")
+    smtp_host: str = Field(
+        default="localhost",
+        validation_alias=AliasChoices("smtp_host", "spring_mail_host"),
+    )
+    smtp_port: int = Field(
+        default=1025,
+        ge=1,
+        le=65535,
+        validation_alias=AliasChoices("smtp_port", "spring_mail_port"),
+    )
+    smtp_username: str = Field(
+        default="",
+        validation_alias=AliasChoices("smtp_username", "spring_mail_username"),
+    )
+    smtp_password: SecretStr = Field(
+        default=SecretStr(""),
+        validation_alias=AliasChoices("smtp_password", "spring_mail_password"),
+    )
     app_email_from: str = "Adept <no-reply@adept.local>"
     app_frontend_base_url: str = "http://localhost:5173"
 
