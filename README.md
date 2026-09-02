@@ -81,3 +81,5 @@ access plus the existing `LIGHTSAIL_HOST`, `LIGHTSAIL_USER`, and
 `LIGHTSAIL_SSH_KEY` secrets; no PAT is required.
 
 <!-- mock PR to verify real-time PR risk evaluation in Adept dashboard -->
+
+<!-- verified: real-time PR risk scoring connected -->
