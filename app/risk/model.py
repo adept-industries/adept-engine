@@ -7,6 +7,7 @@ import json
 import platform
 from dataclasses import dataclass
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 import joblib
@@ -33,6 +34,7 @@ class RiskPredictionResult:
 
 class JitFineRiskModel:
     def __init__(self, artifact_directory: Path | str = DEFAULT_ARTIFACT_DIRECTORY) -> None:
+        self._lock = RLock()
         self.artifact_directory = Path(artifact_directory)
         self.model: Any | None = None
         self.metadata: dict[str, Any] | None = None
@@ -47,6 +49,10 @@ class JitFineRiskModel:
         )
 
     def load(self) -> None:
+        with self._lock:
+            self._load()
+
+    def _load(self) -> None:
         metadata_path = self.artifact_directory / "metadata.json"
         model_path = self.artifact_directory / "model.joblib"
         report_path = self.artifact_directory / "training-report.json"
@@ -72,6 +78,12 @@ class JitFineRiskModel:
         )
 
     def predict(self, features: PullRequestRiskFeatures) -> RiskPredictionResult:
+        # Loading and inference share mutable estimator state. Serialize only
+        # model work, not the surrounding provider requests or database work.
+        with self._lock:
+            return self._predict(features)
+
+    def _predict(self, features: PullRequestRiskFeatures) -> RiskPredictionResult:
         if not self.ready:
             self.load()
         if self.model is None or self.metadata is None or self.positive_class_position is None:

@@ -21,6 +21,8 @@ class Settings(BaseSettings):
 
     engine_poll_interval_ms: int = Field(default=1000, ge=100, le=60_000)
     engine_worker_id: str = Field(default="local-worker-1", min_length=1, max_length=128)
+    # One container, bounded concurrency for the shared production VM.
+    engine_worker_threads: int = Field(default=2, ge=1, le=2)
     engine_max_job_attempts: int = Field(default=8, ge=1, le=100)
     engine_job_lock_timeout_seconds: int = Field(default=900, ge=30, le=86_400)
 

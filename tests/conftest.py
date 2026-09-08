@@ -7,7 +7,20 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import Engine, create_engine, text
 
+from app.core.config import Settings
 from app.db.session import SUPPORTED_SCHEMA_VERSIONS
+
+
+@pytest.fixture
+def isolated_worker_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+    for key in (
+        "ENGINE_WORKER_THREADS",
+        "ENGINE_WORKER_ID",
+        "ENGINE_POLL_INTERVAL_MS",
+        "ENGINE_JOB_LOCK_TIMEOUT_SECONDS",
+    ):
+        monkeypatch.delenv(key, raising=False)
 
 
 class JobFactory:

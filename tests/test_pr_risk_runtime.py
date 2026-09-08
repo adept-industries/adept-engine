@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from threading import Barrier
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock
@@ -159,6 +161,29 @@ def test_approved_artifact_rejects_a_different_python_minor(
 
     with pytest.raises(RuntimeError, match="metadata mismatch for pythonVersion"):
         JitFineRiskModel().load()
+
+
+def test_concurrent_predictions_load_the_shared_artifact_only_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import joblib
+
+    load = MagicMock(wraps=joblib.load)
+    monkeypatch.setattr("app.risk.model.joblib.load", load)
+    model = JitFineRiskModel()
+    features = PullRequestRiskFeatures(2, 3, 4, 1.5, 100, 20, 0)
+    barrier = Barrier(2, timeout=5)
+
+    def predict() -> RiskPredictionResult:
+        barrier.wait()
+        return model.predict(features)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(predict) for _ in range(2)]
+        results = [future.result(timeout=10) for future in futures]
+    load.assert_called_once()
+    assert model.ready
+    assert results[0] == results[1]
 
 
 def test_probability_thresholds_use_all_four_database_risk_levels() -> None:

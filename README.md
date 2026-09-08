@@ -37,8 +37,54 @@ Run the worker in a separate terminal with the same environment:
 uv run python -m app.worker
 ```
 
-- `GET /health` checks only process liveness.
+- `GET /health` reports HTTP-process liveness and that process's `modelReady` flag.
 - `GET /ready` requires PostgreSQL and a supported Flyway V7–V15 schema.
+
+## Worker concurrency
+
+One worker process/container runs **two job-processing threads** by default.
+`ENGINE_WORKER_THREADS` accepts `1` (sequential rollback) or `2`; higher values
+are rejected to keep concurrency bounded on the shared VM. For example:
+
+```bash
+ENGINE_WORKER_THREADS=1 uv run python -m app.worker
+```
+
+For Docker, set this in the worker container's environment; adding a variable
+only to Compose's interpolation `.env` file does not automatically pass it in.
+No second worker container, database migration, or autoscaler is required.
+
+- Each thread claims one job with PostgreSQL `FOR UPDATE SKIP LOCKED` and has
+  a unique owner ID, including a process-start UUID. SQLAlchemy's engine/pool
+  is shared, but individual database connections and transactions are not.
+  The row lock ends with the claim transaction; advisory locks protect execution.
+- Different repositories can run concurrently. A repository advisory lock
+  serializes work for the same repository. Workspace-wide jobs (catalog/Jira
+  sync and deletion) exclude repository work in that workspace. Busy jobs are
+  requeued for five seconds without spending an attempt, allowing other work.
+- Each active job has a lightweight heartbeat thread with its own database
+  session. It refreshes the claim at most every 30 seconds and holds a job
+  advisory lock. Stale recovery skips that lock, even if the heartbeat is late.
+  Closing the session releases its locks; sessions holding locks are never
+  returned to the connection pool.
+- Losing that guard session terminates the worker process rather than letting
+  an unprotected handler continue. The existing Docker restart policy starts
+  it again; unfinished jobs are retried after the stale timeout (default 15
+  minutes since the last heartbeat), or marked `DEAD` when attempts are exhausted.
+  Retries remain **at least once**, not a guarantee of exactly-once external side effects.
+- The PR-risk model is shared and loading/prediction are protected by a lock.
+  Provider requests and database work can still overlap; this does not promise
+  doubled CPU throughput or bypass provider rate limits. The worker loads it on
+  first prediction. The separate HTTP process loads its own copy at startup;
+  its health endpoints do not prove the background worker is making progress.
+- SIGTERM/SIGINT stop new claims and allow in-flight handlers to finish. The
+  deployment workflow allows 120 seconds before Docker force-stops the old
+  container. Work interrupted after that uses the normal recovery/retry path.
+
+Worker logs include `consumer_count` on startup and the unique `worker_id` on
+claims/errors. With two active jobs, up to two additional heartbeat sessions
+are open. Deploy/restart the existing worker to activate this change; no
+production resources are changed by local development.
 
 ## Quality checks
 
