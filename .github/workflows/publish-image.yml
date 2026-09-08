@@ -95,7 +95,9 @@ jobs:
             cd /opt/adept
             sed -i "s|^ENGINE_IMAGE=.*|ENGINE_IMAGE=ghcr.io/adept-industries/adept-engine:sha-${{ github.event.workflow_run.head_sha }}|" .env.production
             sudo docker compose --env-file .env.production -f compose.yaml pull engine-api engine-worker
-            sudo docker compose --env-file .env.production -f compose.yaml up -d --no-deps engine-api engine-worker
+            # Keep one worker container; its process runs two job threads.
+            # Allow SIGTERM handlers to finish in-flight work before replacement.
+            sudo docker compose --env-file .env.production -f compose.yaml up -d --no-deps --timeout 120 engine-api engine-worker
             sudo docker compose --env-file .env.production -f compose.yaml ps
             ready=false
             for attempt in $(seq 1 60); do

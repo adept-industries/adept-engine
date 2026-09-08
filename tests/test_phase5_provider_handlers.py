@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -28,6 +29,7 @@ from app.jobs.handlers import (
     sync_github_repositories,
     sync_jira_projects,
 )
+from app.jobs.lease import JobLease, JobScopeBusy
 from app.jobs.retry import PermanentJobError
 from app.metrics.service import link_deployments_to_pull_requests
 from app.normalization import deployments as deployment_normalization
@@ -247,6 +249,66 @@ def _raw_event(
             },
         )
     return raw_event_id
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "context_source", ["columns", "raw_event", "repository", "jira_integration"]
+)
+def test_job_guard_resolves_scope_from_the_handler_context(
+    database_engine: Engine,
+    provider_rows: ProviderRows,
+    job_factory: JobFactory,
+    context_source: str,
+) -> None:
+    job_factory.insert(payload={"workspaceId": str(provider_rows.workspace_id)})
+    blocker = claim_jobs(database_engine, "blocker", limit=1)[0]
+    if context_source == "raw_event":
+        event_id = _raw_event(
+            database_engine,
+            provider_rows,
+            source="GITHUB",
+            event_type="push",
+            action=None,
+            payload={},
+            repository_id=provider_rows.repository_id,
+        )
+        target_id = job_factory.insert(
+            job_type="PROCESS_GITHUB_EVENT", payload={"rawEventId": str(event_id)}
+        )
+    elif context_source == "jira_integration":
+        target_id = job_factory.insert(
+            job_type="RENEW_JIRA_WEBHOOK",
+            payload={"jiraIntegrationId": str(provider_rows.jira_integration_id)},
+        )
+    elif context_source == "repository":
+        target_id = job_factory.insert(payload={"repositoryId": str(provider_rows.repository_id)})
+    else:
+        target_id = job_factory.insert()
+        with database_engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE processing_jobs SET workspace_id=:workspace, repository_id=:repo "
+                    "WHERE id=:id"
+                ),
+                {
+                    "workspace": provider_rows.workspace_id,
+                    "repo": provider_rows.repository_id,
+                    "id": target_id,
+                },
+            )
+    target = claim_jobs(database_engine, "target", limit=1)[0]
+    assert target.id == target_id
+    failed = MagicMock()
+    with (
+        JobLease(
+            database_engine, blocker, "blocker", interval_seconds=60, on_connection_lost=failed
+        ),
+        pytest.raises(JobScopeBusy),
+        JobLease(database_engine, target, "target", interval_seconds=60, on_connection_lost=failed),
+    ):
+        pytest.fail("must wait for workspace-wide work even without payload workspaceId")
+    failed.assert_not_called()
 
 
 def test_workflow_production_classification_requires_branch_and_workflow_patterns() -> None:

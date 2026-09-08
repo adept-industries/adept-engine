@@ -50,24 +50,42 @@ CLAIM_SQL = text(
 
 MARK_EXHAUSTED_STALE_JOBS_DEAD_SQL = text(
     """
-    UPDATE processing_jobs
+    WITH stale AS (
+        SELECT id
+        FROM processing_jobs
+        WHERE status = 'RUNNING'
+          AND (locked_at IS NULL
+               OR locked_at <= now() - make_interval(secs => :stale_after_seconds))
+          AND attempts >= max_attempts
+          AND pg_try_advisory_xact_lock(hashtextextended('adept:job:' || id::text, 0))
+        FOR UPDATE SKIP LOCKED
+    )
+    UPDATE processing_jobs AS job
     SET status = 'DEAD',
         locked_at = NULL,
         locked_by = NULL,
         last_error = :last_error,
         finished_at = now(),
         updated_at = now(),
-        version = version + 1
-    WHERE status = 'RUNNING'
-      AND (locked_at IS NULL
-           OR locked_at <= now() - make_interval(secs => :stale_after_seconds))
-      AND attempts >= max_attempts
+        version = job.version + 1
+    FROM stale
+    WHERE job.id = stale.id
     """
 )
 
 REQUEUE_RETRYABLE_STALE_JOBS_SQL = text(
     """
-    UPDATE processing_jobs
+    WITH stale AS (
+        SELECT id
+        FROM processing_jobs
+        WHERE status = 'RUNNING'
+          AND (locked_at IS NULL
+               OR locked_at <= now() - make_interval(secs => :stale_after_seconds))
+          AND attempts < max_attempts
+          AND pg_try_advisory_xact_lock(hashtextextended('adept:job:' || id::text, 0))
+        FOR UPDATE SKIP LOCKED
+    )
+    UPDATE processing_jobs AS job
     SET status = 'FAILED',
         available_at = now(),
         locked_at = NULL,
@@ -75,11 +93,9 @@ REQUEUE_RETRYABLE_STALE_JOBS_SQL = text(
         last_error = :last_error,
         finished_at = NULL,
         updated_at = now(),
-        version = version + 1
-    WHERE status = 'RUNNING'
-      AND (locked_at IS NULL
-           OR locked_at <= now() - make_interval(secs => :stale_after_seconds))
-      AND attempts < max_attempts
+        version = job.version + 1
+    FROM stale
+    WHERE job.id = stale.id
     """
 )
 

@@ -10,7 +10,18 @@ SUPPORTED_SCHEMA_VERSIONS = frozenset({"7", "8", "9", "10", "11", "12", "13", "1
 @lru_cache
 def get_database_engine() -> Engine:
     settings = get_settings()
-    return create_engine(settings.database_url, pool_pre_ping=True)
+    return create_engine(
+        settings.database_url,
+        pool_pre_ping=True,
+        connect_args={
+            "connect_timeout": 5,
+            "keepalives": 1,
+            "keepalives_idle": 5,
+            "keepalives_interval": 2,
+            "keepalives_count": 3,
+            "tcp_user_timeout": 10000,
+        },
+    )
 
 
 def current_schema_version(database_engine: Engine) -> str:
