@@ -1,6 +1,7 @@
 import math
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Event
+from unittest.mock import MagicMock
 from urllib.error import URLError
 from urllib.request import urlopen
 
@@ -10,7 +11,7 @@ from prometheus_client.parser import text_string_to_metric_families
 
 from app.jobs.queue_metrics import QueueSnapshot
 from app.monitoring import worker_metrics
-from app.monitoring.worker_metrics import MetricsEndpoint, WorkerMetrics
+from app.monitoring.worker_metrics import MetricsEndpoint, QueueMetricsSampler, WorkerMetrics
 
 
 def _samples(
@@ -273,6 +274,37 @@ def test_queue_error_retains_last_successful_values_and_freshness(
     )
 
 
+def test_queue_sampler_contains_collection_errors_and_keeps_last_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metrics = WorkerMetrics(1, {"KNOWN"})
+    sampler = QueueMetricsSampler(MagicMock(), metrics, interval_seconds=30)
+    snapshot = QueueSnapshot(
+        ready=4,
+        oldest_ready_wait_seconds=12.0,
+        running=1,
+        dead_letter=2,
+    )
+    collect = MagicMock(return_value=snapshot)
+    monkeypatch.setattr(worker_metrics, "collect_queue_snapshot", collect)
+
+    assert sampler.collect_once() is True
+    collect.side_effect = RuntimeError("database unavailable")
+    assert sampler.collect_once() is False
+
+    assert _sample_value(metrics.registry, "adept_engine_worker_queue_ready_jobs") == 4
+    assert _sample_value(metrics.registry, "adept_engine_worker_queue_running_jobs") == 1
+    assert _sample_value(metrics.registry, "adept_engine_worker_queue_dead_letter_jobs") == 2
+    assert _sample_value(metrics.registry, "adept_engine_worker_queue_collection_success") == 0
+    assert (
+        _sample_value(
+            metrics.registry,
+            "adept_engine_worker_queue_collection_errors_total",
+        )
+        == 1
+    )
+
+
 def test_two_slots_update_metrics_concurrently() -> None:
     metrics = WorkerMetrics(2, {"KNOWN"})
     both_active = Barrier(3, timeout=5)
@@ -361,3 +393,62 @@ def test_metrics_endpoint_scrape_stop_and_port_rebind() -> None:
             assert response.status == 200
     finally:
         rebound.stop()
+
+
+def test_worker_metrics_validation() -> None:
+    with pytest.raises(ValueError, match="configured_threads must be positive"):
+        WorkerMetrics(0, {"KNOWN"})
+
+    with pytest.raises(ValueError, match="known_job_types must not be empty"):
+        WorkerMetrics(1, set())
+
+    metrics = WorkerMetrics(1, {"KNOWN"})
+
+    with pytest.raises(ValueError, match="unknown job error operation"):
+        metrics.record_job_operation_error("KNOWN", "invalid_operation")
+
+    with pytest.raises(ValueError, match="stale recovery counts cannot be negative"):
+        metrics.record_stale_recovery(-1, 0)
+
+    with pytest.raises(ValueError, match="stale recovery counts cannot be negative"):
+        metrics.record_stale_recovery(0, -1)
+
+    with pytest.raises(ValueError, match="unknown lease failure phase"):
+        metrics.record_lease_failure(1, "invalid_phase")
+
+
+def test_collect_queue_snapshot_validation_and_mock() -> None:
+    with pytest.raises(ValueError, match="statement_timeout_seconds must be between 1 and 60"):
+        worker_metrics.collect_queue_snapshot(MagicMock(), statement_timeout_seconds=0)
+
+    with pytest.raises(ValueError, match="statement_timeout_seconds must be between 1 and 60"):
+        worker_metrics.collect_queue_snapshot(MagicMock(), statement_timeout_seconds=61)
+
+    mock_engine = MagicMock()
+    mock_conn = MagicMock()
+    mock_engine.begin.return_value.__enter__.return_value = mock_conn
+    mock_conn.execute.return_value.mappings.return_value.one.return_value = {
+        "ready": 5,
+        "oldest_ready_wait_seconds": 15.5,
+        "running": 2,
+        "dead_letter": 1,
+    }
+
+    snapshot = worker_metrics.collect_queue_snapshot(mock_engine, statement_timeout_seconds=5)
+    assert snapshot.ready == 5
+    assert snapshot.oldest_ready_wait_seconds == 15.5
+    assert snapshot.running == 2
+    assert snapshot.dead_letter == 1
+
+
+def test_queue_metrics_sampler_lifecycle() -> None:
+    metrics = WorkerMetrics(1, {"KNOWN"})
+    sampler = QueueMetricsSampler(MagicMock(), metrics, interval_seconds=1)
+
+    assert sampler.stop() is True
+
+    sampler.start()
+    with pytest.raises(RuntimeError, match="already started"):
+        sampler.start()
+
+    assert sampler.stop(timeout_seconds=5.0) is True

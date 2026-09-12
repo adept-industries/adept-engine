@@ -17,7 +17,6 @@ ATTEMPT_OUTCOMES = frozenset({"succeeded", "retry_scheduled", "dead_lettered"})
 PROCESSING_OUTCOMES = ATTEMPT_OUTCOMES | {"continuation_requeued", "operational_error"}
 DEFERRAL_REASONS = frozenset({"continuation", "scope_busy", "shutdown"})
 LEASE_FAILURE_PHASES = frozenset({"acquire", "connection_lost"})
-STALE_RECOVERY_OUTCOMES = frozenset({"retry_scheduled", "dead_lettered"})
 JOB_ERROR_OPERATIONS = frozenset({"deferral", "dispatch"})
 
 JOB_DURATION_BUCKETS_SECONDS = (
@@ -324,13 +323,17 @@ class MetricsEndpoint:
 
     def stop(self) -> None:
         server, thread = self._server, self._thread
-        self._server = None
-        self._thread = None
         if server is None or thread is None:
             return
-        server.shutdown()
-        server.server_close()
-        thread.join()
+        try:
+            server.shutdown()
+        finally:
+            try:
+                server.server_close()
+            finally:
+                thread.join()
+                self._server = None
+                self._thread = None
 
 
 class QueueMetricsSampler:
@@ -349,14 +352,17 @@ class QueueMetricsSampler:
     def collect_once(self) -> bool:
         try:
             snapshot = collect_queue_snapshot(self.database_engine)
+            self.metrics.record_queue_snapshot(snapshot)
         except Exception as exc:
-            self.metrics.record_queue_collection_error()
+            try:
+                self.metrics.record_queue_collection_error()
+            except Exception:
+                logger.exception("engine_worker_queue_metrics_update_failed")
             logger.warning(
                 "engine_worker_queue_metrics_collection_failed",
                 error_type=type(exc).__name__,
             )
             return False
-        self.metrics.record_queue_snapshot(snapshot)
         return True
 
     def start(self) -> None:
