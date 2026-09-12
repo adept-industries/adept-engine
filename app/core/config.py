@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     engine_worker_threads: int = Field(default=2, ge=1, le=2)
     engine_max_job_attempts: int = Field(default=8, ge=1, le=100)
     engine_job_lock_timeout_seconds: int = Field(default=900, ge=30, le=86_400)
+    engine_metrics_bind_address: str = Field(default="0.0.0.0", min_length=1, max_length=255)
+    engine_metrics_port: int = Field(default=8001, ge=1, le=65_535)
+    engine_queue_metrics_interval_seconds: int = Field(default=30, ge=5, le=3_600)
 
     stale_pr_hours_threshold: int = Field(default=120, ge=1)
     outcome_observation_window_days: int = Field(default=14, ge=1)

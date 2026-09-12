@@ -19,6 +19,9 @@ def isolated_worker_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "ENGINE_WORKER_ID",
         "ENGINE_POLL_INTERVAL_MS",
         "ENGINE_JOB_LOCK_TIMEOUT_SECONDS",
+        "ENGINE_METRICS_BIND_ADDRESS",
+        "ENGINE_METRICS_PORT",
+        "ENGINE_QUEUE_METRICS_INTERVAL_SECONDS",
     ):
         monkeypatch.delenv(key, raising=False)
 
