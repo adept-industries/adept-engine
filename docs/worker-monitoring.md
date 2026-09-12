@@ -85,6 +85,13 @@ URL, exception text or other unbounded/customer-specific value.
 
 ## Semantics and failure behavior
 
+- Monitoring startup is best effort: a port-bind or sampler-start failure logs
+  `engine_worker_monitoring_start_failed` with the component and error type,
+  but processing threads still start. Each component starts independently;
+  monitoring shutdown errors also cannot skip the remaining worker cleanup.
+  There is no automatic startup retry: fix the configuration/resource issue and
+  restart the worker. PR 3 must alert on an unreachable scrape target and stale
+  queue snapshots; a live endpoint alone does not prove monitoring is healthy.
 - An empty queue is healthy idle behavior. A successful empty snapshot reports
   ready count and oldest wait as zero.
 - Ready work exactly matches claiming: status PENDING or FAILED,
@@ -115,8 +122,13 @@ URL, exception text or other unbounded/customer-specific value.
   healthy idle time, the thread stays alive/ inactive and keeps polling.
 
 Counters and histogram state are in memory and reset when the worker process
-restarts. Thread gauges also reset and are initialized only for configured
-slots. Queue gauges rebuild from durable PostgreSQL state on the next successful
+restarts. Every bounded counter/histogram label combination, including `UNKNOWN`,
+is published at zero before its first event. This gives `rate`/`increase` a
+baseline when a scrape precedes that event; events before the first scrape or
+between a final scrape and a restart can still be missed. Initialization does
+not record fake jobs or duration samples. Thread series only use configured
+slots, and queue values remain `NaN` until their first successful snapshot.
+Queue gauges rebuild from durable PostgreSQL state on the next successful
 sample. A heartbeat connection loss still terminates the process immediately;
 its in-memory counter may disappear before a scrape, while the later durable
 stale-recovery counter records the resulting retry/dead-letter transition.

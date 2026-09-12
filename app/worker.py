@@ -284,8 +284,18 @@ def run() -> None:
     }
     logger.info("engine_worker_pool_starting", consumer_count=settings.engine_worker_threads)
     try:
-        metrics_endpoint.start()
-        queue_metrics.start()
+        for component, start_monitoring in (
+            ("metrics_endpoint", metrics_endpoint.start),
+            ("queue_sampler", queue_metrics.start),
+        ):
+            try:
+                start_monitoring()
+            except Exception as exc:
+                logger.warning(
+                    "engine_worker_monitoring_start_failed",
+                    component=component,
+                    error_type=type(exc).__name__,
+                )
         with ThreadPoolExecutor(
             max_workers=settings.engine_worker_threads, thread_name_prefix="engine-consumer"
         ) as executor:
@@ -309,9 +319,21 @@ def run() -> None:
             finally:
                 stop.set()
     finally:
-        if not queue_metrics.stop():
-            logger.warning("engine_worker_queue_metrics_shutdown_timed_out")
-        metrics_endpoint.stop()
+        for component, stop_monitoring in (
+            ("queue_sampler", queue_metrics.stop),
+            ("metrics_endpoint", metrics_endpoint.stop),
+        ):
+            try:
+                if stop_monitoring() is False:
+                    logger.warning(
+                        "engine_worker_monitoring_shutdown_timed_out", component=component
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "engine_worker_monitoring_stop_failed",
+                    component=component,
+                    error_type=type(exc).__name__,
+                )
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
         database_engine.dispose()

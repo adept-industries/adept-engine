@@ -187,6 +187,23 @@ class WorkerMetrics:
             self.thread_active_job_duration.labels(thread_slot=slot).set_function(
                 partial(self._active_duration, slot)
             )
+            self.poll_errors.labels(thread_slot=slot)
+            for phase in LEASE_FAILURE_PHASES:
+                self.lease_failures.labels(thread_slot=slot, phase=phase)
+
+        # Publish a zero baseline before the first event, without recording fake
+        # attempts or duration observations. All label combinations are bounded.
+        for job_type in sorted(self._known_job_types | {"UNKNOWN"}):
+            for outcome in ATTEMPT_OUTCOMES:
+                self.job_attempts.labels(job_type=job_type, outcome=outcome)
+            for outcome in PROCESSING_OUTCOMES:
+                self.job_processing_duration.labels(job_type=job_type, outcome=outcome)
+            for reason in DEFERRAL_REASONS:
+                self.job_deferrals.labels(job_type=job_type, reason=reason)
+            for operation in JOB_ERROR_OPERATIONS:
+                self.job_operation_errors.labels(job_type=job_type, operation=operation)
+        for outcome in ("retry_scheduled", "dead_lettered"):
+            self.stale_jobs_recovered.labels(outcome=outcome)
 
     def _slot(self, slot: int | str) -> str:
         value = str(slot)

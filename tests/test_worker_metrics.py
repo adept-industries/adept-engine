@@ -9,6 +9,7 @@ import pytest
 from prometheus_client import CollectorRegistry, generate_latest
 from prometheus_client.parser import text_string_to_metric_families
 
+from app.jobs.dispatcher import HANDLERS
 from app.jobs.queue_metrics import QueueSnapshot
 from app.monitoring import worker_metrics
 from app.monitoring.worker_metrics import MetricsEndpoint, QueueMetricsSampler, WorkerMetrics
@@ -61,6 +62,8 @@ def test_thread_series_are_initialized_for_configured_slots_only(
         "adept_engine_worker_thread_active",
         "adept_engine_worker_thread_last_successful_poll_timestamp_seconds",
         "adept_engine_worker_thread_active_job_duration_seconds",
+        "adept_engine_worker_poll_errors_total",
+        "adept_engine_worker_lease_failures_total",
     ):
         samples = _samples(metrics.registry, metric_name)
         assert {labels["thread_slot"] for labels, _ in samples} == expected_slots
@@ -68,6 +71,84 @@ def test_thread_series_are_initialized_for_configured_slots_only(
 
     with pytest.raises(ValueError, match="unknown thread slot"):
         metrics.mark_thread_started(configured_threads + 1)
+
+
+@pytest.mark.parametrize("configured_threads", [1, 2])
+def test_bounded_counter_and_histogram_series_start_at_zero(configured_threads: int) -> None:
+    metrics = WorkerMetrics(configured_threads, HANDLERS)
+    job_types = set(HANDLERS) | {"UNKNOWN"}
+    expected_labels = {
+        "job_attempts_total": [
+            {"job_type": job_type, "outcome": outcome}
+            for job_type in job_types
+            for outcome in worker_metrics.ATTEMPT_OUTCOMES
+        ],
+        "job_deferrals_total": [
+            {"job_type": job_type, "reason": reason}
+            for job_type in job_types
+            for reason in worker_metrics.DEFERRAL_REASONS
+        ],
+        "job_operation_errors_total": [
+            {"job_type": job_type, "operation": operation}
+            for job_type in job_types
+            for operation in worker_metrics.JOB_ERROR_OPERATIONS
+        ],
+        "stale_jobs_recovered_total": [
+            {"outcome": outcome} for outcome in ("retry_scheduled", "dead_lettered")
+        ],
+        "poll_errors_total": [
+            {"thread_slot": str(slot)} for slot in range(1, configured_threads + 1)
+        ],
+        "lease_failures_total": [
+            {"thread_slot": str(slot), "phase": phase}
+            for slot in range(1, configured_threads + 1)
+            for phase in worker_metrics.LEASE_FAILURE_PHASES
+        ],
+    }
+    duration_labels = [
+        {"job_type": job_type, "outcome": outcome}
+        for job_type in job_types
+        for outcome in worker_metrics.PROCESSING_OUTCOMES
+    ]
+    for suffix in ("count", "sum"):
+        expected_labels[f"job_processing_duration_seconds_{suffix}"] = duration_labels
+    expected_labels["job_processing_duration_seconds_bucket"] = [
+        {**labels, "le": "+Inf" if bucket == "+Inf" else str(float(bucket))}
+        for labels in duration_labels
+        for bucket in (*worker_metrics.JOB_DURATION_BUCKETS_SECONDS, "+Inf")
+    ]
+
+    for name, labels in expected_labels.items():
+        samples = _samples(metrics.registry, f"adept_engine_worker_{name}")
+        assert {tuple(sorted(label.items())) for label, _ in samples} == {
+            tuple(sorted(label.items())) for label in labels
+        }
+        assert samples
+        assert all(value == 0 for _, value in samples)
+
+    exposition = generate_latest(metrics.registry).decode("utf-8")
+    sample_count = sum(len(family.samples) for family in text_string_to_metric_families(exposition))
+    assert sample_count < 5000  # PR 3's documented scrape sample limit.
+
+
+def test_first_failure_increments_previously_scraped_zero_series() -> None:
+    metrics = WorkerMetrics(1, {"KNOWN"})
+    labels = {"job_type": "KNOWN", "outcome": "dead_lettered"}
+    attempt_name = "adept_engine_worker_job_attempts_total"
+    duration_count = "adept_engine_worker_job_processing_duration_seconds_count"
+    assert _sample_value(metrics.registry, attempt_name, labels) == 0
+    assert _sample_value(metrics.registry, duration_count, labels) == 0
+
+    metrics.record_dispatch_outcome("KNOWN", "dead_lettered", 2.5)
+
+    assert _sample_value(metrics.registry, attempt_name, labels) == 1
+    assert _sample_value(metrics.registry, duration_count, labels) == 1
+    assert (
+        _sample_value(
+            metrics.registry, "adept_engine_worker_job_processing_duration_seconds_sum", labels
+        )
+        == 2.5
+    )
 
 
 def test_active_job_duration_progresses_and_resets(
@@ -184,9 +265,9 @@ def test_unknown_job_types_are_bounded_and_outcomes_are_counted() -> None:
         for labels, _ in _samples(metrics.registry, "adept_engine_worker_job_attempts_total")
     }
     assert attempt_labels == {
-        (("job_type", "KNOWN"), ("outcome", "succeeded")),
-        (("job_type", "UNKNOWN"), ("outcome", "dead_lettered")),
-        (("job_type", "UNKNOWN"), ("outcome", "retry_scheduled")),
+        (("job_type", job_type), ("outcome", outcome))
+        for job_type in ("KNOWN", "UNKNOWN")
+        for outcome in worker_metrics.ATTEMPT_OUTCOMES
     }
     exposition = generate_latest(metrics.registry).decode("utf-8")
     assert all(

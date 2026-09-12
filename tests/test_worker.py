@@ -1,3 +1,4 @@
+import socket
 from datetime import UTC, datetime
 from threading import Barrier, Event
 from unittest.mock import ANY, MagicMock
@@ -66,6 +67,12 @@ def _metric_value(
     return matches[0]
 
 
+def _assert_zero_metric(metrics: WorkerMetrics, name: str) -> None:
+    samples = _metric_samples(metrics, name)
+    assert samples
+    assert all(value == 0 for _, value in samples)
+
+
 def test_dispatch_continues_after_one_claimed_job_crashes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -124,7 +131,7 @@ def test_dispatch_records_confirmed_outcome_metrics(
         == 2.5
     )
     if outcome is JobDispatchOutcome.CONTINUATION_REQUEUED:
-        assert _metric_samples(metrics, "adept_engine_worker_job_attempts_total") == []
+        _assert_zero_metric(metrics, "adept_engine_worker_job_attempts_total")
         assert (
             _metric_value(
                 metrics,
@@ -155,7 +162,7 @@ def test_dispatch_records_operational_error_without_attempt_outcome(
 
     dispatch_claimed_jobs(MagicMock(), [job], "test-worker", metrics)
 
-    assert _metric_samples(metrics, "adept_engine_worker_job_attempts_total") == []
+    _assert_zero_metric(metrics, "adept_engine_worker_job_attempts_total")
     assert (
         _metric_value(
             metrics,
@@ -270,7 +277,7 @@ def test_consumer_claims_one_job_and_guards_dispatch(
             )
             == 1
         )
-        assert _metric_samples(metrics, "adept_engine_worker_job_attempts_total") == []
+        _assert_zero_metric(metrics, "adept_engine_worker_job_attempts_total")
     else:
         dispatch.assert_called_once_with(engine, [job], "owner", metrics)
         lease.return_value.__exit__.assert_called_once()
@@ -305,7 +312,7 @@ def test_shutdown_after_claim_returns_the_job_without_dispatch(
         )
         == 1
     )
-    assert _metric_samples(metrics, "adept_engine_worker_job_attempts_total") == []
+    _assert_zero_metric(metrics, "adept_engine_worker_job_attempts_total")
 
 
 def test_metrics_failure_does_not_change_durable_deferral(
@@ -362,7 +369,7 @@ def test_idle_poll_is_successful_while_consumer_is_alive(
         )
         > 0
     )
-    assert _metric_samples(metrics, "adept_engine_worker_poll_errors_total") == []
+    _assert_zero_metric(metrics, "adept_engine_worker_poll_errors_total")
     assert (
         _metric_value(
             metrics,
@@ -433,7 +440,7 @@ def test_lease_acquisition_failure_is_recorded(
         )
         == 1
     )
-    assert _metric_samples(metrics, "adept_engine_worker_job_attempts_total") == []
+    _assert_zero_metric(metrics, "adept_engine_worker_job_attempts_total")
 
 
 def test_lease_connection_loss_is_recorded_before_fail_closed_exit(
@@ -506,10 +513,26 @@ def test_stale_recovery_callback_records_committed_counts(
     )
 
 
-def test_pool_runs_two_distinct_consumers_and_waits_for_shutdown(
+@pytest.mark.parametrize("configured_threads", [1, 2])
+@pytest.mark.parametrize(
+    "monitoring_failure",
+    [
+        None,
+        "endpoint_start",
+        "queue_start",
+        "both_start",
+        "queue_stop",
+        "endpoint_stop",
+        "both_stop",
+        "queue_timeout",
+    ],
+)
+def test_pool_runs_consumers_and_cleans_up_despite_monitoring_failures(
     monkeypatch: pytest.MonkeyPatch,
+    configured_threads: int,
+    monitoring_failure: str | None,
 ) -> None:
-    barrier = Barrier(2, timeout=5)
+    barrier = Barrier(configured_threads, timeout=5)
     owners: list[str] = []
     finished: list[str] = []
     engine = MagicMock()
@@ -529,7 +552,7 @@ def test_pool_runs_two_distinct_consumers_and_waits_for_shutdown(
         _metrics: WorkerMetrics,
     ) -> None:
         assert db is engine
-        assert slot in (1, 2)
+        assert 1 <= slot <= configured_threads
         owners.append(owner)
         barrier.wait()
         handler = handlers[worker.signal.SIGTERM]
@@ -543,29 +566,41 @@ def test_pool_runs_two_distinct_consumers_and_waits_for_shutdown(
         finished.append(owner)
 
     monkeypatch.setattr(worker, "configure_logging", lambda: None)
-    monkeypatch.setattr(worker, "get_settings", Settings)
+    monkeypatch.setattr(
+        worker, "get_settings", lambda: Settings(engine_worker_threads=configured_threads)
+    )
     monkeypatch.setattr(worker, "get_database_engine", lambda: engine)
     monkeypatch.setattr(worker, "current_schema_version", lambda _: "15")
     monkeypatch.setattr(worker, "consume_jobs", consume)
     monkeypatch.setattr(worker.signal, "signal", register)
     endpoint = MagicMock()
     queue_metrics = MagicMock()
+    logger = MagicMock()
+    monkeypatch.setattr(worker, "logger", logger)
+    if monitoring_failure in ("endpoint_start", "both_start"):
+        endpoint.start.side_effect = OSError("endpoint cannot start")
+    if monitoring_failure in ("queue_start", "both_start"):
+        queue_metrics.start.side_effect = RuntimeError("sampler cannot start")
 
     def stop_queue_metrics() -> bool:
         assert sorted(finished) == sorted(owners)
         assert endpoint.stop.call_count == 0
-        return True
+        if monitoring_failure in ("queue_stop", "both_stop"):
+            raise RuntimeError("sampler cannot stop")
+        return monitoring_failure != "queue_timeout"
 
     def stop_endpoint() -> None:
         assert sorted(finished) == sorted(owners)
         assert queue_metrics.stop.call_count == 1
+        if monitoring_failure in ("endpoint_stop", "both_stop"):
+            raise OSError("endpoint cannot stop")
 
     queue_metrics.stop.side_effect = stop_queue_metrics
     endpoint.stop.side_effect = stop_endpoint
     monkeypatch.setattr(worker, "MetricsEndpoint", MagicMock(return_value=endpoint))
     monkeypatch.setattr(worker, "QueueMetricsSampler", MagicMock(return_value=queue_metrics))
     worker.run()
-    assert len(set(owners)) == 2
+    assert len(set(owners)) == configured_threads
     assert sorted(finished) == sorted(owners)
     assert all(handler is None for handler in handlers.values())
     endpoint.start.assert_called_once_with()
@@ -573,3 +608,111 @@ def test_pool_runs_two_distinct_consumers_and_waits_for_shutdown(
     queue_metrics.start.assert_called_once_with()
     queue_metrics.stop.assert_called_once_with()
     engine.dispose.assert_called_once()
+    if monitoring_failure in ("endpoint_start", "both_start"):
+        logger.warning.assert_any_call(
+            "engine_worker_monitoring_start_failed",
+            component="metrics_endpoint",
+            error_type="OSError",
+        )
+    if monitoring_failure in ("queue_start", "both_start"):
+        logger.warning.assert_any_call(
+            "engine_worker_monitoring_start_failed",
+            component="queue_sampler",
+            error_type="RuntimeError",
+        )
+    if monitoring_failure in ("queue_stop", "both_stop"):
+        logger.warning.assert_any_call(
+            "engine_worker_monitoring_stop_failed",
+            component="queue_sampler",
+            error_type="RuntimeError",
+        )
+    if monitoring_failure in ("endpoint_stop", "both_stop"):
+        logger.warning.assert_any_call(
+            "engine_worker_monitoring_stop_failed",
+            component="metrics_endpoint",
+            error_type="OSError",
+        )
+    if monitoring_failure == "queue_timeout":
+        logger.warning.assert_any_call(
+            "engine_worker_monitoring_shutdown_timed_out", component="queue_sampler"
+        )
+    if monitoring_failure is None:
+        logger.warning.assert_not_called()
+
+
+def test_occupied_metrics_port_does_not_prevent_consumers_starting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = MagicMock()
+    sampler = MagicMock()
+    logger = MagicMock()
+    slots: list[int] = []
+
+    def consume(
+        _db: object,
+        _settings: Settings,
+        _owner: str,
+        stop: Event,
+        slot: int,
+        _metrics: WorkerMetrics,
+    ) -> None:
+        slots.append(slot)
+        stop.set()
+
+    monkeypatch.setattr(worker, "configure_logging", lambda: None)
+    monkeypatch.setattr(worker, "get_database_engine", lambda: engine)
+    monkeypatch.setattr(worker, "current_schema_version", lambda _: "15")
+    monkeypatch.setattr(worker, "consume_jobs", consume)
+    monkeypatch.setattr(worker, "QueueMetricsSampler", MagicMock(return_value=sampler))
+    monkeypatch.setattr(worker, "logger", logger)
+    monkeypatch.setattr(worker.signal, "signal", MagicMock())
+    with socket.socket() as occupied:
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen()
+        settings = Settings(
+            engine_worker_threads=2,
+            engine_metrics_bind_address="127.0.0.1",
+            engine_metrics_port=occupied.getsockname()[1],
+        )
+        monkeypatch.setattr(worker, "get_settings", lambda: settings)
+        worker.run()
+
+    assert sorted(slots) == [1, 2]
+    sampler.start.assert_called_once_with()
+    sampler.stop.assert_called_once_with()
+    engine.dispose.assert_called_once_with()
+    logger.warning.assert_called_once_with(
+        "engine_worker_monitoring_start_failed",
+        component="metrics_endpoint",
+        error_type="OSError",
+    )
+
+
+def test_monitoring_cleanup_errors_do_not_hide_consumer_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = MagicMock()
+    endpoint = MagicMock()
+    sampler = MagicMock()
+    endpoint.stop.side_effect = OSError("endpoint cleanup failed")
+    sampler.stop.side_effect = RuntimeError("sampler cleanup failed")
+    signal = MagicMock(return_value=worker.signal.SIG_DFL)
+    monkeypatch.setattr(worker, "configure_logging", lambda: None)
+    monkeypatch.setattr(worker, "get_settings", lambda: Settings(engine_worker_threads=1))
+    monkeypatch.setattr(worker, "get_database_engine", lambda: engine)
+    monkeypatch.setattr(worker, "current_schema_version", lambda _: "15")
+    monkeypatch.setattr(worker, "MetricsEndpoint", MagicMock(return_value=endpoint))
+    monkeypatch.setattr(worker, "QueueMetricsSampler", MagicMock(return_value=sampler))
+    monkeypatch.setattr(worker.signal, "signal", signal)
+    consumer = MagicMock(side_effect=RuntimeError("consumer failed"))
+    monkeypatch.setattr(worker, "consume_jobs", consumer)
+
+    with pytest.raises(RuntimeError, match="^consumer failed$"):
+        worker.run()
+
+    assert consumer.call_args.args[3].is_set()
+    sampler.stop.assert_called_once_with()
+    endpoint.stop.assert_called_once_with()
+    for signum in (worker.signal.SIGTERM, worker.signal.SIGINT):
+        signal.assert_any_call(signum, worker.signal.SIG_DFL)
+    engine.dispose.assert_called_once_with()
