@@ -37,6 +37,12 @@ Run the worker in a separate terminal with the same environment:
 uv run python -m app.worker
 ```
 
+The worker also serves Prometheus metrics at private `GET :8001/metrics` by
+default. It must remain on the internal container network and must not be
+published through Caddy or a host port. See
+[the worker monitoring contract](docs/worker-monitoring.md) for metric
+semantics, settings and the exact Alloy/Compose handoff for monitoring PR 3.
+
 - `GET /health` reports HTTP-process liveness and that process's `modelReady` flag.
 - `GET /ready` requires PostgreSQL and a supported Flyway V7–V15 schema.
 

@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import structlog
@@ -119,6 +120,7 @@ def claim_jobs(
     limit: int = 10,
     *,
     stale_after_seconds: int = 900,
+    on_stale_recovery: Callable[[StaleJobRecovery], None] | None = None,
 ) -> list[ClaimedJob]:
     if not worker_id or len(worker_id) > 128:
         raise ValueError("worker_id must contain 1 to 128 characters")
@@ -139,6 +141,11 @@ def claim_jobs(
         )
 
     if recovery.total:
+        if on_stale_recovery is not None:
+            try:
+                on_stale_recovery(recovery)
+            except Exception:
+                logger.exception("stale_job_recovery_metrics_failed")
         logger.warning(
             "stale_jobs_recovered",
             retryable=recovery.retryable,

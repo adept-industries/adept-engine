@@ -11,7 +11,9 @@ from app.core.config import Settings
 from app.db.models import ClaimedJob
 from app.jobs import lease
 from app.jobs.claimer import claim_jobs
+from app.jobs.dispatcher import HANDLERS, JobDispatchOutcome
 from app.jobs.retry import JobOwnershipError, mark_succeeded
+from app.monitoring.worker_metrics import WorkerMetrics
 from tests.conftest import JobFactory
 
 pytestmark = pytest.mark.usefixtures("isolated_worker_environment")
@@ -170,33 +172,63 @@ def test_two_consumers_process_distinct_jobs_concurrently_and_drain_on_stop(
         job_factory.insert(payload={"workspaceId": str(workspace_id), "repositoryId": str(uuid4())})
         for _ in range(2)
     ]
-    barrier = Barrier(2, timeout=5)
+    both_active = Barrier(3, timeout=5)
+    release = Event()
     stop = Event()
     observed: list[tuple[str, str]] = []
     record_lock = Lock()
 
-    def dispatch(engine: Engine, job: ClaimedJob, owner: str) -> None:
+    def dispatch(engine: Engine, job: ClaimedJob, owner: str) -> JobDispatchOutcome:
         with record_lock:
             observed.append((str(job.id), owner))
-        barrier.wait()  # Fails if processing silently becomes sequential.
+        both_active.wait()  # Fails if processing silently becomes sequential.
+        assert release.wait(5)
         stop.set()  # In-flight handlers must finish even after shutdown starts.
         mark_succeeded(engine, job.id, owner)
+        return JobDispatchOutcome.SUCCEEDED
 
     monkeypatch.setattr(worker, "dispatch_job", dispatch)
     settings = Settings(engine_poll_interval_ms=100)
+    metrics = WorkerMetrics(2, HANDLERS)
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [
-            pool.submit(worker.consume_jobs, database_engine, settings, f"owner-{slot}", stop)
+            pool.submit(
+                worker.consume_jobs,
+                database_engine,
+                settings,
+                f"owner-{slot}",
+                stop,
+                slot,
+                metrics,
+            )
             for slot in (1, 2)
         ]
         try:
+            both_active.wait()
+            for slot in ("1", "2"):
+                assert (
+                    metrics.registry.get_sample_value(
+                        "adept_engine_worker_thread_active",
+                        {"thread_slot": slot},
+                    )
+                    == 1
+                )
+            release.set()
             for future in futures:
                 future.result(timeout=10)
         finally:
+            release.set()
             stop.set()
     assert {job for job, _ in observed} == {str(job_id) for job_id in ids}
     assert len({owner for _, owner in observed}) == 2
     assert all(job_factory.row(job_id)["status"] == "SUCCEEDED" for job_id in ids)
+    assert (
+        metrics.registry.get_sample_value(
+            "adept_engine_worker_job_attempts_total",
+            {"job_type": "RECALCULATE_METRICS", "outcome": "succeeded"},
+        )
+        == 2
+    )
 
 
 @pytest.mark.integration
@@ -210,6 +242,7 @@ def test_busy_scope_is_requeued_without_consuming_an_attempt(
     stop = Event()
     original = worker._defer
     dispatch = MagicMock()
+    metrics = WorkerMetrics(2, HANDLERS)
 
     def defer(engine: Engine, job: ClaimedJob, owner: str) -> None:
         original(engine, job, owner)
@@ -218,13 +251,32 @@ def test_busy_scope_is_requeued_without_consuming_an_attempt(
     monkeypatch.setattr(worker, "_defer", defer)
     monkeypatch.setattr(worker, "dispatch_job", dispatch)
     with _guard(database_engine, first, "first"):
-        worker.consume_jobs(database_engine, Settings(), "second", stop)
+        worker.consume_jobs(
+            database_engine,
+            Settings(),
+            "second",
+            stop,
+            1,
+            metrics,
+        )
     dispatch.assert_not_called()
     row = job_factory.row(queued_id)
     assert row["status"] == "PENDING"
     assert row["attempts"] == 0
     assert row["locked_by"] is None
     assert row["payload"] == payload
+    assert (
+        metrics.registry.get_sample_value(
+            "adept_engine_worker_job_deferrals_total",
+            {"job_type": "RECALCULATE_METRICS", "reason": "scope_busy"},
+        )
+        == 1
+    )
+    for outcome in ("succeeded", "retry_scheduled", "dead_lettered"):
+        assert metrics.registry.get_sample_value(
+            "adept_engine_worker_job_attempts_total",
+            {"job_type": "RECALCULATE_METRICS", "outcome": outcome},
+        ) in (None, 0)
 
 
 @pytest.mark.integration
@@ -256,14 +308,23 @@ def test_busy_repository_does_not_prevent_claiming_other_ready_work(
     other = job_factory.insert(payload={"repositoryId": str(uuid4())}, priority=100)
     stop = Event()
 
-    def dispatch(engine: Engine, job: ClaimedJob, owner: str) -> None:
+    def dispatch(engine: Engine, job: ClaimedJob, owner: str) -> JobDispatchOutcome:
         assert job.id == other
         mark_succeeded(engine, job.id, owner)
         stop.set()
+        return JobDispatchOutcome.SUCCEEDED
 
     monkeypatch.setattr(worker, "dispatch_job", dispatch)
     with _guard(database_engine, running, "first"), ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(worker.consume_jobs, database_engine, Settings(), "second", stop)
+        future = pool.submit(
+            worker.consume_jobs,
+            database_engine,
+            Settings(),
+            "second",
+            stop,
+            1,
+            WorkerMetrics(2, HANDLERS),
+        )
         try:
             future.result(timeout=3)
         finally:

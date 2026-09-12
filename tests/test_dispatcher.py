@@ -7,7 +7,7 @@ from sqlalchemy import Engine
 
 from app.db.models import ClaimedJob
 from app.jobs.claimer import claim_jobs
-from app.jobs.dispatcher import HANDLERS, dispatch_job
+from app.jobs.dispatcher import HANDLERS, JobDispatchOutcome, dispatch_job
 from app.jobs.retry import JobOwnershipError, PermanentJobError, RequeueWithPayloadError
 from app.providers import ProviderError
 from tests.conftest import JobFactory
@@ -52,8 +52,9 @@ def test_dispatcher_is_the_only_success_finalizer(monkeypatch: pytest.MonkeyPatc
         patch("app.jobs.dispatcher.mark_succeeded") as mark_succeeded,
         patch("app.jobs.dispatcher.mark_failed") as mark_failed,
     ):
-        dispatch_job(engine, job, job.locked_by)
+        outcome = dispatch_job(engine, job, job.locked_by)
 
+    assert outcome is JobDispatchOutcome.SUCCEEDED
     handler.assert_called_once_with(engine, job, job.locked_by)
     mark_succeeded.assert_called_once_with(engine, job.id, job.locked_by)
     mark_failed.assert_not_called()
@@ -69,10 +70,11 @@ def test_dispatcher_marks_transient_handler_failure_once(
 
     with (
         patch("app.jobs.dispatcher.mark_succeeded") as mark_succeeded,
-        patch("app.jobs.dispatcher.mark_failed") as mark_failed,
+        patch("app.jobs.dispatcher.mark_failed", return_value="FAILED") as mark_failed,
     ):
-        dispatch_job(engine, job, job.locked_by)
+        outcome = dispatch_job(engine, job, job.locked_by)
 
+    assert outcome is JobDispatchOutcome.RETRY_SCHEDULED
     mark_succeeded.assert_not_called()
     mark_failed.assert_called_once_with(
         engine,
@@ -92,10 +94,11 @@ def test_dispatcher_marks_permanent_handler_failure_once(
 
     with (
         patch("app.jobs.dispatcher.mark_succeeded") as mark_succeeded,
-        patch("app.jobs.dispatcher.mark_failed") as mark_failed,
+        patch("app.jobs.dispatcher.mark_failed", return_value="DEAD") as mark_failed,
     ):
-        dispatch_job(engine, job, job.locked_by)
+        outcome = dispatch_job(engine, job, job.locked_by)
 
+    assert outcome is JobDispatchOutcome.DEAD_LETTERED
     mark_succeeded.assert_not_called()
     mark_failed.assert_called_once_with(
         engine,
@@ -118,10 +121,11 @@ def test_dispatcher_respects_provider_retry_after(
 
     with (
         patch("app.jobs.dispatcher.mark_succeeded") as mark_succeeded,
-        patch("app.jobs.dispatcher.mark_failed") as mark_failed,
+        patch("app.jobs.dispatcher.mark_failed", return_value="FAILED") as mark_failed,
     ):
-        dispatch_job(engine, job, job.locked_by)
+        outcome = dispatch_job(engine, job, job.locked_by)
 
+    assert outcome is JobDispatchOutcome.RETRY_SCHEDULED
     mark_succeeded.assert_not_called()
     mark_failed.assert_called_once_with(
         engine,
@@ -144,8 +148,9 @@ def test_dispatcher_does_not_finalize_explicitly_requeued_job(
         patch("app.jobs.dispatcher.mark_succeeded") as mark_succeeded,
         patch("app.jobs.dispatcher.mark_failed") as mark_failed,
     ):
-        dispatch_job(engine, job, job.locked_by)
+        outcome = dispatch_job(engine, job, job.locked_by)
 
+    assert outcome is JobDispatchOutcome.CONTINUATION_REQUEUED
     mark_succeeded.assert_not_called()
     mark_failed.assert_not_called()
 
@@ -174,9 +179,10 @@ def test_unsupported_job_is_marked_dead() -> None:
     engine = MagicMock()
     job = _job("UNKNOWN_JOB")
 
-    with patch("app.jobs.dispatcher.mark_failed") as mark_failed:
-        dispatch_job(engine, job, job.locked_by)
+    with patch("app.jobs.dispatcher.mark_failed", return_value="DEAD") as mark_failed:
+        outcome = dispatch_job(engine, job, job.locked_by)
 
+    assert outcome is JobDispatchOutcome.DEAD_LETTERED
     mark_failed.assert_called_once_with(
         engine,
         job.id,
@@ -200,8 +206,9 @@ def test_real_handler_is_finalized_once(
     handler = MagicMock()
     monkeypatch.setitem(HANDLERS, "DELETE_WORKSPACE", handler)
 
-    dispatch_job(database_engine, job, "test-worker")
+    outcome = dispatch_job(database_engine, job, "test-worker")
 
+    assert outcome is JobDispatchOutcome.SUCCEEDED
     row = job_factory.row(job_id)
     assert row["status"] == "SUCCEEDED"
     assert row["locked_by"] is None

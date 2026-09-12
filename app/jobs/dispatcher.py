@@ -1,3 +1,5 @@
+from enum import StrEnum
+
 import structlog
 from sqlalchemy import Engine
 
@@ -30,7 +32,22 @@ HANDLERS = {
 }
 
 
-def dispatch_job(database_engine: Engine, job: ClaimedJob, worker_id: str) -> None:
+class JobDispatchOutcome(StrEnum):
+    SUCCEEDED = "succeeded"
+    RETRY_SCHEDULED = "retry_scheduled"
+    DEAD_LETTERED = "dead_lettered"
+    CONTINUATION_REQUEUED = "continuation_requeued"
+
+
+def _failure_outcome(status: str) -> JobDispatchOutcome:
+    if status == "FAILED":
+        return JobDispatchOutcome.RETRY_SCHEDULED
+    if status == "DEAD":
+        return JobDispatchOutcome.DEAD_LETTERED
+    raise RuntimeError(f"unexpected durable job failure status: {status}")
+
+
+def dispatch_job(database_engine: Engine, job: ClaimedJob, worker_id: str) -> JobDispatchOutcome:
     handler = HANDLERS.get(job.job_type)
     if handler is None:
         # Unknown job types are a permanent configuration/data error; marking DEAD
@@ -38,14 +55,15 @@ def dispatch_job(database_engine: Engine, job: ClaimedJob, worker_id: str) -> No
         logger.warning(
             "unsupported_job_type_marked_dead", job_type=job.job_type, job_id=str(job.id)
         )
-        mark_failed(
-            database_engine,
-            job.id,
-            worker_id,
-            f"UNSUPPORTED_JOB_TYPE: {job.job_type}",
-            permanent=True,
+        return _failure_outcome(
+            mark_failed(
+                database_engine,
+                job.id,
+                worker_id,
+                f"UNSUPPORTED_JOB_TYPE: {job.job_type}",
+                permanent=True,
+            )
         )
-        return
 
     try:
         # Handlers own business work only. They return on success, raise
@@ -54,7 +72,7 @@ def dispatch_job(database_engine: Engine, job: ClaimedJob, worker_id: str) -> No
         handler(database_engine, job, worker_id)
     except RequeueWithPayloadError:
         logger.info("job_requeued", job_id=str(job.id), job_type=job.job_type)
-        return
+        return JobDispatchOutcome.CONTINUATION_REQUEUED
     except PermanentJobError as exc:
         logger.warning(
             "job_permanent_failure",
@@ -62,8 +80,9 @@ def dispatch_job(database_engine: Engine, job: ClaimedJob, worker_id: str) -> No
             job_type=job.job_type,
             error=str(exc),
         )
-        mark_failed(database_engine, job.id, worker_id, str(exc), permanent=True)
-        return
+        return _failure_outcome(
+            mark_failed(database_engine, job.id, worker_id, str(exc), permanent=True)
+        )
     except ProviderError as exc:
         logger.error(
             "provider_job_execution_failed",
@@ -72,14 +91,15 @@ def dispatch_job(database_engine: Engine, job: ClaimedJob, worker_id: str) -> No
             error=str(exc),
             retry_after_seconds=exc.retry_after_seconds,
         )
-        mark_failed(
-            database_engine,
-            job.id,
-            worker_id,
-            str(exc),
-            retry_after_seconds=exc.retry_after_seconds,
+        return _failure_outcome(
+            mark_failed(
+                database_engine,
+                job.id,
+                worker_id,
+                str(exc),
+                retry_after_seconds=exc.retry_after_seconds,
+            )
         )
-        return
     except Exception as exc:
         logger.error(
             "job_execution_failed",
@@ -87,11 +107,11 @@ def dispatch_job(database_engine: Engine, job: ClaimedJob, worker_id: str) -> No
             job_type=job.job_type,
             error=str(exc),
         )
-        mark_failed(database_engine, job.id, worker_id, str(exc))
-        return
+        return _failure_outcome(mark_failed(database_engine, job.id, worker_id, str(exc)))
 
     # Keep this outside the handler try/except. If ownership was lost while the
     # handler ran, mark_succeeded must surface that operational error instead of
     # incorrectly attempting a second state transition through mark_failed.
     mark_succeeded(database_engine, job.id, worker_id)
     logger.info("job_completed_successfully", job_id=str(job.id), job_type=job.job_type)
+    return JobDispatchOutcome.SUCCEEDED
