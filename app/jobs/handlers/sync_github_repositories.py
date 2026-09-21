@@ -21,12 +21,11 @@ logger = structlog.get_logger()
 
 DEFAULT_REPOSITORY_SETTINGS = {
     "deploymentSignal": "WORKFLOW_RUN",
-    "productionBranchPatterns": ["main", "master", "release/*"],
-    "productionEnvironmentPatterns": ["production", "prod", "live"],
-    "deploymentWorkflowNamePatterns": ["*deploy*", "*production*", "*release*"],
+    "productionBranchPatterns": [],
+    "productionEnvironmentPatterns": [],
+    "deploymentWorkflowNamePatterns": [],
     "incidentSource": "GITHUB",
     "doraExclusions": [],
-    "defaultMetricGranularity": "WEEK",
     "backfillDays": 90,
 }
 
