@@ -10,7 +10,7 @@ PR-risk inference uses only the approved `jitfine-expert-pr-risk-mvp-v1` artifac
 
 Project issue ingestion is isolated from DORA and PR-risk recalculation. GitHub `issues` webhooks maintain live state, while issue-only repository jobs backfill every open issue and exclude pull requests returned by GitHub's Issues API. Jira issue-only jobs page through unresolved issues for the explicitly mapped, tracked Jira projects. Completed syncs close or resolve stale local rows that are no longer returned by the providers.
 
-The API's Flyway migrations exclusively own the schema. The engine supports schema versions 7 through 15 during the forward-compatible rollout and must not add Alembic or create tables.
+The API's Flyway migrations exclusively own the schema. The engine supports schema versions 7 through 16 during the forward-compatible rollout and must not add Alembic or create tables.
 
 ## Install
 
@@ -44,7 +44,7 @@ published through Caddy or a host port. See
 semantics, settings and the exact Alloy/Compose handoff for monitoring PR 3.
 
 - `GET /health` reports HTTP-process liveness and that process's `modelReady` flag.
-- `GET /ready` requires PostgreSQL and a supported Flyway V7–V15 schema.
+- `GET /ready` requires PostgreSQL and a supported Flyway V7–V16 schema.
 
 ## Worker concurrency
 

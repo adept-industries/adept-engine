@@ -7,7 +7,7 @@ from app.db.session import SUPPORTED_SCHEMA_VERSIONS, current_schema_version
 
 
 def test_supports_current_and_next_project_issue_schema_during_rollout() -> None:
-    assert {"14", "15"}.issubset(SUPPORTED_SCHEMA_VERSIONS)
+    assert {"15", "16"}.issubset(SUPPORTED_SCHEMA_VERSIONS)
 
 
 def test_health_reports_the_embedded_pr_risk_artifact_ready() -> None:
