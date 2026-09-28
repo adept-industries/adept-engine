@@ -496,7 +496,7 @@ def _cycle_time_snapshots(
                 text(
                     """
                     SELECT pr.id, pr.first_commit_at, pr.opened_at, pr.ready_for_review_at,
-                           pr.merged_at, pr.additions, pr.deletions,
+                           pr.merged_at,
                            reviews.first_review_at,
                            deployed.deployed_at
                     FROM pull_requests pr

@@ -10,8 +10,8 @@ Every stage is measured per PR and stored as a pooled observation keyed by the
 PR, timestamped at ``merged_at``. All stages therefore describe the same weekly
 cohort (PRs merged that week), which keeps a stacked bar of medians coherent.
 A stage is omitted for a PR when either boundary is unknown or out of order.
-Every observation also carries per-PR facts (size, time to merge, whether it
-was reviewed), so the API can break PRs down by size from any stage.
+Every observation also records whether its PR was reviewed, so the API can
+count PRs merged without a review from any stage.
 """
 
 from __future__ import annotations
@@ -29,16 +29,6 @@ STAGE_METRIC_TYPES = {
     "review": "PR_REVIEW_TIME_HOURS",
     "deploy": "PR_DEPLOY_TIME_HOURS",
 }
-
-# Upper bounds of changed lines (additions + deletions) per size bucket.
-_SIZE_BUCKETS = (("S", 100), ("M", 400), ("L", 1000))
-
-
-def size_bucket(changed_lines: int) -> str:
-    for label, upper in _SIZE_BUCKETS:
-        if changed_lines <= upper:
-            return label
-    return "XL"
 
 
 def pickup_start(pull_request: dict[str, Any]) -> datetime | None:
@@ -71,17 +61,12 @@ def pull_request_stage_hours(pull_request: dict[str, Any]) -> dict[str, float]:
     }
     stages: dict[str, float] = {}
     for stage, (begin, end) in boundaries.items():
-        hours = _hours_between(begin, end)
-        if hours is not None:
-            stages[stage] = hours
+        if begin is None or end is None:
+            continue
+        seconds = (end - begin).total_seconds()
+        if seconds >= 0:
+            stages[stage] = round(seconds / 3600.0, 4)
     return stages
-
-
-def _hours_between(begin: datetime | None, end: datetime | None) -> float | None:
-    if begin is None or end is None:
-        return None
-    seconds = (end - begin).total_seconds()
-    return round(seconds / 3600.0, 4) if seconds >= 0 else None
 
 
 def calculate_cycle_time_stages(
@@ -98,11 +83,6 @@ def calculate_cycle_time_stages(
         merged_at: datetime | None = pull_request.get("merged_at")
         if merged_at is None or not period_start <= merged_at < period_end:
             continue
-        size = size_bucket(
-            int(pull_request.get("additions") or 0) + int(pull_request.get("deletions") or 0)
-        )
-        # Open until merged, whether or not anyone reviewed it.
-        merge_hours = _hours_between(pickup_start(pull_request), merged_at)
         reviewed = pull_request.get("first_review_at") is not None
         for stage, hours in pull_request_stage_hours(pull_request).items():
             observations[stage].append(
@@ -110,8 +90,6 @@ def calculate_cycle_time_stages(
                     "key": str(pull_request["id"]),
                     "at": merged_at.isoformat(),
                     "value": hours,
-                    "size": size,
-                    "merge_hours": merge_hours,
                     "reviewed": reviewed,
                 }
             )
