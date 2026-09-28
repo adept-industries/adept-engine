@@ -497,18 +497,12 @@ def _cycle_time_snapshots(
                     """
                     SELECT pr.id, pr.first_commit_at, pr.opened_at, pr.ready_for_review_at,
                            pr.merged_at, pr.additions, pr.deletions,
-                           reviews.first_review_at, reviews.approved_at, reviews.review_rounds,
+                           reviews.first_review_at,
                            deployed.deployed_at
                     FROM pull_requests pr
                     LEFT JOIN LATERAL (
                         -- Authors replying to threads and bots are not reviewers.
-                        SELECT min(r.submitted_at) AS first_review_at,
-                               max(r.submitted_at) FILTER (
-                                   WHERE r.state = 'APPROVED'
-                               ) AS approved_at,
-                               count(*) FILTER (
-                                   WHERE r.state = 'CHANGES_REQUESTED'
-                               ) AS review_rounds
+                        SELECT min(r.submitted_at) AS first_review_at
                         FROM pull_request_reviews r
                         WHERE r.pull_request_id = pr.id
                           AND r.reviewer_is_bot = false
