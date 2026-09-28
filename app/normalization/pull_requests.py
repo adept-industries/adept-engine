@@ -33,14 +33,18 @@ def upsert_pull_request(
     action: str | None = None,
     commits: list[dict[str, Any]] | None = None,
     reviews: list[dict[str, Any]] | None = None,
+    ready_for_review_at: datetime | None = None,
 ) -> UUID:
     """
     Parse *pr_data* (the ``pull_request`` object from the GitHub event) and
     upsert the corresponding row in ``pull_requests``.
 
+    ``ready_for_review_at`` is the draft-to-ready transition time when the
+    caller knows it exactly, for example from the delivery that announced it.
+
     Returns the database UUID of the upserted row.
     """
-    row = _build_row(workspace_id, repository_id, pr_data, action, commits)
+    row = _build_row(workspace_id, repository_id, pr_data, action, commits, ready_for_review_at)
     pull_request_id = _run_upsert(database_engine, row)
     if commits is not None:
         _replace_commits(database_engine, pull_request_id, commits)
@@ -60,6 +64,7 @@ def _build_row(
     pr: dict[str, Any],
     action: str | None,
     commits: list[dict[str, Any]] | None,
+    ready_for_review_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Transform a raw GitHub PR dict into a flat dict matching the DB schema."""
     merged = pr.get("merged", False)
@@ -103,9 +108,8 @@ def _build_row(
         "merged_at": _parse_ts(merged_at_raw),
         # GitHub does not expose the transition time on the PR itself; the
         # delivery that announces it is the closest trustworthy timestamp.
-        "ready_for_review_at": (
-            _parse_ts(pr.get("updated_at")) if action == "ready_for_review" else None
-        ),
+        "ready_for_review_at": ready_for_review_at
+        or (_parse_ts(pr.get("updated_at")) if action == "ready_for_review" else None),
         "provider_updated_at": _parse_ts(pr.get("updated_at")),
         "raw_data": pr,
     }

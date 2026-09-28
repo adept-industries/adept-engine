@@ -261,6 +261,13 @@ def _handle_pull_request(
                 action,
                 commits,
                 reviews,
+                # The delivery's snapshot was taken at the transition; the
+                # fresh read above may reflect later pushes or edits.
+                ready_for_review_at=(
+                    _github_timestamp(webhook_pr.get("updated_at"))
+                    if action == "ready_for_review"
+                    else None
+                ),
             )
             if str(pr_data.get("state", "")).lower() == "open":
                 changed_files = _non_negative_changed_files(pr_data)
@@ -374,6 +381,16 @@ def _handle_pull_request_review(
     bound_logger.info(
         "pull_request_reviews_replaced", pr_db_id=str(pr_id), review_count=len(reviews)
     )
+
+
+def _github_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def _pull_request_id(database_engine: Engine, repository_id: UUID, number: int) -> UUID | None:
