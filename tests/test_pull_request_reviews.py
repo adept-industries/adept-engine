@@ -263,8 +263,4 @@ def test_recalculation_measures_review_stages_from_human_reviews(
     pickup = next(row for row in rows if row["metric_type"] == "PR_PICKUP_TIME_HOURS")
     assert pickup["sample_size"] == 1
     observation = pickup["dimensions"]["observations"][0]
-    assert (observation["size"], observation["merge_hours"], observation["reviewed"]) == (
-        "M",
-        50.0,
-        True,
-    )
+    assert observation["reviewed"] is True

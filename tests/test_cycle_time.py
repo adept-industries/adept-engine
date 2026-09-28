@@ -5,14 +5,11 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-import pytest
-
 from app.metrics.cycle_time import (
     CYCLE_TIME_CALCULATION_VERSION,
     calculate_cycle_time_stages,
     pickup_start,
     pull_request_stage_hours,
-    size_bucket,
 )
 
 MONDAY = datetime(2026, 9, 21, tzinfo=UTC)
@@ -29,8 +26,6 @@ def _pull_request(**overrides: Any) -> dict[str, Any]:
         "first_review_at": MONDAY + timedelta(days=2, hours=11),
         "merged_at": MONDAY + timedelta(days=2, hours=17),
         "deployed_at": MONDAY + timedelta(days=3, hours=10),
-        "additions": 120,
-        "deletions": 30,
     }
     base.update(overrides)
     return base
@@ -69,14 +64,6 @@ def test_out_of_order_boundaries_are_excluded() -> None:
     assert stages["pickup"] == 44.0
 
 
-@pytest.mark.parametrize(
-    ("changed_lines", "expected"),
-    [(0, "S"), (100, "S"), (101, "M"), (400, "M"), (1000, "L"), (1001, "XL")],
-)
-def test_size_bucket_boundaries(changed_lines: int, expected: str) -> None:
-    assert size_bucket(changed_lines) == expected
-
-
 def test_stage_snapshots_pool_prs_merged_in_the_period() -> None:
     week_end = MONDAY + timedelta(days=7)
     pull_requests = [
@@ -85,7 +72,7 @@ def test_stage_snapshots_pool_prs_merged_in_the_period() -> None:
             id="pr-43",
             first_review_at=MONDAY + timedelta(days=1, hours=15),
         ),
-        # Merged without a review: no pickup or review, but time to merge still counts.
+        # Merged without a review: only coding and deploy are measurable.
         _pull_request(id="pr-45", first_review_at=None),
         # Merged next week, so it belongs to another cohort.
         _pull_request(id="pr-44", merged_at=week_end + timedelta(hours=1)),
@@ -111,8 +98,6 @@ def test_stage_snapshots_pool_prs_merged_in_the_period() -> None:
         "key": "pr-42",
         "at": (MONDAY + timedelta(days=2, hours=17)).isoformat(),
         "value": 44.0,
-        "size": "M",
-        "merge_hours": 50.0,
         "reviewed": True,
     }
     coding = snapshots["PR_CODING_TIME_HOURS"]
