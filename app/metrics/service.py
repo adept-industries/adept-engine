@@ -24,6 +24,7 @@ from app.metrics.calculator import (
     get_period_buckets,
     get_recalculation_buckets,
 )
+from app.metrics.cycle_time import calculate_cycle_time_stages
 
 logger = structlog.get_logger()
 
@@ -399,6 +400,18 @@ def recalculate_repository_metrics(
                 calculate_change_failure_rate(p_start, p_end, granularity, deployments)
             )
 
+    snapshots_to_upsert.extend(
+        _cycle_time_snapshots(
+            database_engine,
+            repository_id,
+            timezone_name,
+            from_date,
+            to_date,
+            affected_from,
+            affected_to,
+        )
+    )
+
     # 4. Upsert into metric_snapshots
     upserted_count = _upsert_snapshots(
         database_engine, workspace_id, repository_id, snapshots_to_upsert
@@ -420,6 +433,122 @@ def recalculate_repository_metrics(
         snapshot_count=upserted_count,
     )
     return upserted_count
+
+
+def _cycle_time_snapshots(
+    database_engine: Engine,
+    repository_id: UUID,
+    timezone_name: str,
+    from_date: datetime,
+    to_date: datetime,
+    affected_from: datetime | None,
+    affected_to: datetime | None,
+) -> list[MetricSnapshotResult]:
+    """Calculate review cycle-time stages, bucketed by each PR's merge time."""
+    with database_engine.connect() as connection:
+        cycle_affected_from = affected_from
+        if affected_from is not None:
+            # A deployment completes the deploy stage of PRs merged earlier, whose
+            # merge-time buckets may precede the deployment's own bucket.
+            earliest_merge = connection.execute(
+                text(
+                    """
+                    SELECT min(pr.merged_at)
+                    FROM deployments d
+                    JOIN deployment_pull_requests dpr ON dpr.deployment_id = d.id
+                    JOIN pull_requests pr ON pr.id = dpr.pull_request_id
+                    WHERE d.repository_id = :repository_id
+                      AND d.is_production = true
+                      AND d.status = 'SUCCESS'
+                      AND d.finished_at >= :affected_from
+                      AND d.finished_at <= :affected_to
+                      AND pr.merged_at IS NOT NULL
+                    """
+                ),
+                {
+                    "repository_id": str(repository_id),
+                    "affected_from": affected_from,
+                    "affected_to": affected_to or affected_from,
+                },
+            ).scalar_one()
+            if earliest_merge is not None and earliest_merge < affected_from:
+                cycle_affected_from = earliest_merge
+
+        buckets_by_granularity = {
+            granularity: (
+                get_recalculation_buckets(
+                    cycle_affected_from,
+                    affected_to or affected_from or cycle_affected_from,
+                    granularity,
+                    timezone_name,
+                )
+                if cycle_affected_from is not None
+                else get_period_buckets(from_date, to_date, granularity, timezone_name)
+            )
+            for granularity in ("DAY", "WEEK", "MONTH")
+        }
+        all_buckets = [bucket for buckets in buckets_by_granularity.values() for bucket in buckets]
+        if not all_buckets:
+            return []
+
+        rows = (
+            connection.execute(
+                text(
+                    """
+                    SELECT pr.id, pr.first_commit_at, pr.opened_at, pr.ready_for_review_at,
+                           pr.merged_at, pr.additions, pr.deletions,
+                           reviews.first_review_at, reviews.approved_at, reviews.review_rounds,
+                           deployed.deployed_at
+                    FROM pull_requests pr
+                    LEFT JOIN LATERAL (
+                        -- Authors replying to threads and bots are not reviewers.
+                        SELECT min(r.submitted_at) AS first_review_at,
+                               max(r.submitted_at) FILTER (
+                                   WHERE r.state = 'APPROVED'
+                               ) AS approved_at,
+                               count(*) FILTER (
+                                   WHERE r.state = 'CHANGES_REQUESTED'
+                               ) AS review_rounds
+                        FROM pull_request_reviews r
+                        WHERE r.pull_request_id = pr.id
+                          AND r.reviewer_is_bot = false
+                          AND r.reviewer_login IS DISTINCT FROM pr.author_login
+                          AND r.submitted_at <= pr.merged_at
+                    ) reviews ON true
+                    LEFT JOIN LATERAL (
+                        SELECT min(d.finished_at) AS deployed_at
+                        FROM deployment_pull_requests dpr
+                        JOIN deployments d ON d.id = dpr.deployment_id
+                        WHERE dpr.pull_request_id = pr.id
+                          AND d.is_production = true
+                          AND d.status = 'SUCCESS'
+                          AND d.finished_at >= pr.merged_at
+                    ) deployed ON true
+                    WHERE pr.repository_id = :repository_id
+                      AND pr.state = 'MERGED'
+                      AND pr.merged_at >= :window_start
+                      AND pr.merged_at < :window_end
+                    """
+                ),
+                {
+                    "repository_id": str(repository_id),
+                    "window_start": min(start for start, _ in all_buckets),
+                    "window_end": max(end for _, end in all_buckets),
+                },
+            )
+            .mappings()
+            .all()
+        )
+
+    pull_requests = [dict(row) for row in rows]
+    return [
+        snapshot
+        for granularity, buckets in buckets_by_granularity.items()
+        for period_start, period_end in buckets
+        for snapshot in calculate_cycle_time_stages(
+            period_start, period_end, granularity, pull_requests
+        )
+    ]
 
 
 def _upsert_snapshots(
@@ -457,26 +586,26 @@ def _upsert_snapshots(
         """
     )
 
-    count = 0
+    rows = [
+        {
+            "workspace_id": str(workspace_id),
+            "repository_id": str(repository_id),
+            "metric_type": snap.metric_type,
+            "granularity": snap.granularity,
+            "period_start": snap.period_start,
+            "period_end": snap.period_end,
+            "value": snap.value,
+            "unit": snap.unit,
+            "sample_size": snap.sample_size,
+            "calculation_version": snap.calculation_version,
+            "dimensions": json.dumps(snap.dimensions),
+        }
+        for snap in snapshots
+    ]
+    # One batched statement keeps full recalculations cheap on small hosts.
     with database_engine.begin() as connection:
-        for snap in snapshots:
-            params = {
-                "workspace_id": str(workspace_id),
-                "repository_id": str(repository_id),
-                "metric_type": snap.metric_type,
-                "granularity": snap.granularity,
-                "period_start": snap.period_start,
-                "period_end": snap.period_end,
-                "value": snap.value,
-                "unit": snap.unit,
-                "sample_size": snap.sample_size,
-                "calculation_version": snap.calculation_version,
-                "dimensions": json.dumps(snap.dimensions),
-            }
-            connection.execute(sql, params)
-            count += 1
-
-    return count
+        connection.execute(sql, rows)
+    return len(rows)
 
 
 def enqueue_recalculate_metrics_job(
@@ -484,9 +613,13 @@ def enqueue_recalculate_metrics_job(
     workspace_id: UUID,
     repository_id: UUID,
     affected_at: datetime | None = None,
+    affected_to: datetime | None = None,
 ) -> UUID:
     """
     Deduplicated job enqueue for recalculating metrics on a repository.
+
+    ``affected_at`` starts the affected range and ``affected_to`` (default: the
+    same instant) ends it; overlapping enqueues widen the pending range.
     """
     sql = text(
         """
@@ -525,7 +658,7 @@ def enqueue_recalculate_metrics_job(
     }
     if affected_at is not None:
         payload["affected_from"] = affected_at.isoformat()
-        payload["affected_to"] = affected_at.isoformat()
+        payload["affected_to"] = (affected_to or affected_at).isoformat()
     job_id = connection.execute(
         sql,
         {

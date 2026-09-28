@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import Engine, text
 
+from app.metrics.service import recalculate_repository_metrics
 from app.normalization.pull_requests import replace_pull_request_reviews, upsert_pull_request
 
 
@@ -164,3 +165,103 @@ def test_review_resync_replaces_rows_with_current_provider_state(
         (2, "DISMISSED"),
         (3, "APPROVED"),
     ]
+
+
+@pytest.mark.integration
+def test_recalculation_measures_review_stages_from_human_reviews(
+    database_engine: Engine, review_rows: ReviewRows
+) -> None:
+    monday = datetime(2026, 9, 21, tzinfo=UTC)
+    merged_at = monday + timedelta(days=2, hours=17)
+
+    def at(hours: float) -> str:
+        return (monday + timedelta(hours=hours)).isoformat()
+
+    pull_request = {
+        **_pull_request(merged_at, draft=False),
+        "state": "closed",
+        "merged": True,
+        "created_at": at(15),
+        "closed_at": merged_at.isoformat(),
+        "merged_at": merged_at.isoformat(),
+        "merge_commit_sha": "merge42",
+        "additions": 120,
+        "deletions": 30,
+    }
+    commits = [{"sha": "c1", "commit": {"author": {"date": at(9)}}}]
+    reviews = [
+        # Bots and the author answering threads are not reviewers.
+        {**_review(1, "COMMENTED", at(16)), "user": {"login": "ci[bot]", "type": "Bot"}},
+        {**_review(2, "COMMENTED", at(17)), "user": {"login": "author", "type": "User"}},
+        _review(3, "CHANGES_REQUESTED", at(59)),  # Wed 11:00: first human review
+        _review(4, "APPROVED", at(62)),
+        _review(5, "APPROVED", at(64)),  # Wed 16:00: final approval before merge
+        _review(6, "APPROVED", at(70)),  # after merge, ignored
+    ]
+    upsert_pull_request(
+        database_engine,
+        review_rows.workspace_id,
+        review_rows.repository_id,
+        pull_request,
+        "closed",
+        commits,
+        reviews,
+    )
+    with database_engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO deployments (
+                    workspace_id, repository_id, source, external_deployment_id,
+                    environment, is_production, status, commit_sha, started_at, finished_at
+                ) VALUES (
+                    :workspace_id, :repository_id, 'GITHUB_WORKFLOW', 'run-1',
+                    'production', true, 'SUCCESS', 'merge42', :finished_at, :finished_at
+                )
+                """
+            ),
+            {
+                "workspace_id": review_rows.workspace_id,
+                "repository_id": review_rows.repository_id,
+                "finished_at": monday + timedelta(days=3, hours=10),
+            },
+        )
+
+    recalculate_repository_metrics(
+        database_engine,
+        review_rows.workspace_id,
+        review_rows.repository_id,
+        from_date=monday,
+        to_date=monday + timedelta(days=7),
+    )
+
+    with database_engine.connect() as connection:
+        rows = (
+            connection.execute(
+                text(
+                    """
+                    SELECT metric_type, value, sample_size, dimensions
+                    FROM metric_snapshots
+                    WHERE repository_id = :repository_id
+                      AND granularity = 'WEEK'
+                      AND calculation_version = 'cycle-time-v1'
+                      AND period_start = :monday
+                    """
+                ),
+                {"repository_id": review_rows.repository_id, "monday": monday},
+            )
+            .mappings()
+            .all()
+        )
+    values = {row["metric_type"]: float(row["value"]) for row in rows}
+    assert values == {
+        "PR_CODING_TIME_HOURS": 6.0,
+        "PR_PICKUP_TIME_HOURS": 44.0,
+        "PR_REVIEW_TIME_HOURS": 5.0,
+        "PR_MERGE_TIME_HOURS": 1.0,
+        "PR_DEPLOY_TIME_HOURS": 17.0,
+    }
+    pickup = next(row for row in rows if row["metric_type"] == "PR_PICKUP_TIME_HOURS")
+    assert pickup["sample_size"] == 1
+    observation = pickup["dimensions"]["observations"][0]
+    assert (observation["size"], observation["rounds"]) == ("M", 1)

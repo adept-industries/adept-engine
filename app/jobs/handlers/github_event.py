@@ -294,21 +294,25 @@ def _handle_pull_request(
         if converted is exc:
             raise
         raise converted from exc
-    if _pull_request_is_merged(database_engine, pr_id):
+    merged_at = _pull_request_merged_at(database_engine, pr_id)
+    if merged_at is not None:
         previous_affected_at = earliest_linked_production_deployment(database_engine, pr_id)
         link_deployments_to_pull_requests(database_engine, repository_id)
         current_affected_at = earliest_linked_production_deployment(database_engine, pr_id)
+        # Cycle-time stages are bucketed by merge time; DORA lead time by deployment.
         affected_candidates = [
-            value for value in (previous_affected_at, current_affected_at) if value is not None
+            value
+            for value in (merged_at, previous_affected_at, current_affected_at)
+            if value is not None
         ]
-        if affected_candidates:
-            with database_engine.begin() as connection:
-                enqueue_recalculate_metrics_job(
-                    connection,
-                    workspace_id,
-                    repository_id,
-                    affected_at=min(affected_candidates),
-                )
+        with database_engine.begin() as connection:
+            enqueue_recalculate_metrics_job(
+                connection,
+                workspace_id,
+                repository_id,
+                affected_at=min(affected_candidates),
+                affected_to=max(affected_candidates),
+            )
     bound_logger.info("pull_request_upserted", pr_db_id=str(pr_id), action=action)
 
 
@@ -360,6 +364,13 @@ def _handle_pull_request_review(
             raise
         raise converted from exc
     pr_normalizer.replace_pull_request_reviews(database_engine, pr_id, reviews)
+    merged_at = _pull_request_merged_at(database_engine, pr_id)
+    if merged_at is not None:
+        # Reviews of open PRs are picked up by the recalculation queued at merge.
+        with database_engine.begin() as connection:
+            enqueue_recalculate_metrics_job(
+                connection, workspace_id, repository_id, affected_at=merged_at
+            )
     bound_logger.info(
         "pull_request_reviews_replaced", pr_db_id=str(pr_id), review_count=len(reviews)
     )
@@ -441,13 +452,18 @@ def _non_negative_changed_files(pull_request: dict[str, Any]) -> int:
     return parsed
 
 
-def _pull_request_is_merged(database_engine: Engine, pull_request_id: UUID) -> bool:
+def _pull_request_merged_at(database_engine: Engine, pull_request_id: UUID) -> datetime | None:
     with database_engine.connect() as connection:
-        state = connection.execute(
-            text("SELECT state FROM pull_requests WHERE id = :pull_request_id"),
+        value = connection.execute(
+            text(
+                """
+                SELECT merged_at FROM pull_requests
+                WHERE id = :pull_request_id AND state = 'MERGED'
+                """
+            ),
             {"pull_request_id": pull_request_id},
-        ).scalar_one()
-    return str(state) == "MERGED"
+        ).scalar_one_or_none()
+    return value if isinstance(value, datetime) else None
 
 
 def _handle_workflow_run(

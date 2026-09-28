@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -99,7 +100,7 @@ def test_open_pull_request_event_scores_current_provider_state(
     )
     monkeypatch.setattr(github_event.pr_normalizer, "upsert_pull_request", upsert)
     monkeypatch.setattr(github_event, "calculate_and_persist_pull_request_risk", score)
-    monkeypatch.setattr(github_event, "_pull_request_is_merged", MagicMock(return_value=False))
+    monkeypatch.setattr(github_event, "_pull_request_merged_at", MagicMock(return_value=None))
 
     github_event._handle_pull_request(
         MagicMock(),
@@ -151,7 +152,7 @@ def test_closed_pull_request_event_normalizes_without_rescoring(
         MagicMock(return_value=uuid4()),
     )
     monkeypatch.setattr(github_event, "calculate_and_persist_pull_request_risk", score)
-    monkeypatch.setattr(github_event, "_pull_request_is_merged", MagicMock(return_value=False))
+    monkeypatch.setattr(github_event, "_pull_request_merged_at", MagicMock(return_value=None))
 
     github_event._handle_pull_request(
         MagicMock(),
@@ -214,6 +215,7 @@ def test_review_event_replaces_reviews_from_provider_list(monkeypatch: pytest.Mo
     monkeypatch.setattr(github_event, "_pull_request_id", MagicMock(return_value=pull_request_id))
     monkeypatch.setattr(github_event.pr_normalizer, "replace_pull_request_reviews", replace)
     monkeypatch.setattr(github_event, "_handle_pull_request", full_sync)
+    monkeypatch.setattr(github_event, "_pull_request_merged_at", MagicMock(return_value=None))
 
     github_event._dispatch(
         database_engine,
@@ -289,3 +291,38 @@ def test_review_events_without_cycle_time_signal_make_no_provider_calls(
 
     github_client.assert_not_called()
     lookup.assert_not_called()
+
+
+def test_review_change_on_merged_pull_request_queues_recalculation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    merged_at = datetime(2026, 9, 23, 17, tzinfo=UTC)
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.list_pull_request_reviews.return_value = []
+    enqueue = MagicMock()
+    monkeypatch.setattr(github_event, "GithubClient", MagicMock(return_value=client))
+    monkeypatch.setattr(
+        github_event, "load_github_repository", MagicMock(return_value=_review_repository())
+    )
+    monkeypatch.setattr(github_event, "_pull_request_id", MagicMock(return_value=uuid4()))
+    monkeypatch.setattr(github_event.pr_normalizer, "replace_pull_request_reviews", MagicMock())
+    monkeypatch.setattr(github_event, "_pull_request_merged_at", MagicMock(return_value=merged_at))
+    monkeypatch.setattr(github_event, "enqueue_recalculate_metrics_job", enqueue)
+    workspace_id = uuid4()
+    repository_id = uuid4()
+
+    github_event._dispatch(
+        MagicMock(),
+        "pull_request_review",
+        "submitted",
+        {"pull_request": {"number": 42}},
+        workspace_id,
+        repository_id,
+        "WORKFLOW_RUN",
+        MagicMock(),
+    )
+
+    enqueue.assert_called_once()
+    assert enqueue.call_args.args[1:] == (workspace_id, repository_id)
+    assert enqueue.call_args.kwargs == {"affected_at": merged_at}
