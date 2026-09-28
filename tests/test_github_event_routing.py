@@ -326,3 +326,78 @@ def test_review_change_on_merged_pull_request_queues_recalculation(
     enqueue.assert_called_once()
     assert enqueue.call_args.args[1:] == (workspace_id, repository_id)
     assert enqueue.call_args.kwargs == {"affected_at": merged_at}
+
+
+def test_ready_for_review_uses_the_delivery_transition_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MagicMock()
+    client.__enter__.return_value = client
+    # The fresh read reflects a push made an hour after the PR became ready.
+    client.get_pull_request.return_value = {
+        "id": 100,
+        "number": 42,
+        "state": "closed",
+        "merged": False,
+        "updated_at": "2026-09-02T09:00:00Z",
+    }
+    client.list_pull_request_commits.return_value = []
+    client.list_pull_request_reviews.return_value = []
+    upsert = MagicMock(return_value=uuid4())
+
+    monkeypatch.setattr(github_event, "GithubClient", MagicMock(return_value=client))
+    monkeypatch.setattr(
+        github_event,
+        "load_github_repository",
+        MagicMock(
+            return_value=SimpleNamespace(
+                installation_id=99,
+                owner_login="adept-industries",
+                name="adept-engine",
+            )
+        ),
+    )
+    monkeypatch.setattr(github_event.pr_normalizer, "upsert_pull_request", upsert)
+    monkeypatch.setattr(github_event, "_pull_request_merged_at", MagicMock(return_value=None))
+
+    github_event._handle_pull_request(
+        MagicMock(),
+        {"pull_request": {"number": 42, "updated_at": "2026-09-02T08:00:00Z"}},
+        "ready_for_review",
+        uuid4(),
+        uuid4(),
+        MagicMock(),
+    )
+
+    assert upsert.call_args.kwargs["ready_for_review_at"] == datetime(2026, 9, 2, 8, tzinfo=UTC)
+
+
+def test_other_pull_request_actions_do_not_set_a_ready_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.get_pull_request.return_value = {"id": 100, "number": 42, "state": "closed"}
+    client.list_pull_request_commits.return_value = []
+    client.list_pull_request_reviews.return_value = []
+    upsert = MagicMock(return_value=uuid4())
+
+    monkeypatch.setattr(github_event, "GithubClient", MagicMock(return_value=client))
+    monkeypatch.setattr(
+        github_event,
+        "load_github_repository",
+        MagicMock(return_value=SimpleNamespace(installation_id=99, owner_login="o", name="r")),
+    )
+    monkeypatch.setattr(github_event.pr_normalizer, "upsert_pull_request", upsert)
+    monkeypatch.setattr(github_event, "_pull_request_merged_at", MagicMock(return_value=None))
+
+    github_event._handle_pull_request(
+        MagicMock(),
+        {"pull_request": {"number": 42, "updated_at": "2026-09-02T08:00:00Z"}},
+        "edited",
+        uuid4(),
+        uuid4(),
+        MagicMock(),
+    )
+
+    assert upsert.call_args.kwargs["ready_for_review_at"] is None

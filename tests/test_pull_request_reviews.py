@@ -4,11 +4,15 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import Engine, text
 
+from app.db.models import ClaimedJob
+from app.jobs.handlers import backfill_repository
+from app.jobs.retry import PermanentJobError
 from app.metrics.service import recalculate_repository_metrics
 from app.normalization.pull_requests import replace_pull_request_reviews, upsert_pull_request
 
@@ -264,3 +268,98 @@ def test_recalculation_measures_review_stages_from_human_reviews(
     assert pickup["sample_size"] == 1
     observation = pickup["dimensions"]["observations"][0]
     assert observation["reviewed"] is True
+
+
+def _backfill_job(payload: dict[str, Any]) -> ClaimedJob:
+    now = datetime.now(UTC)
+    return ClaimedJob(
+        id=uuid4(),
+        job_type="BACKFILL_REPOSITORY",
+        payload=payload,
+        priority=200,
+        attempts=1,
+        max_attempts=8,
+        locked_by="test-worker",
+        created_at=now,
+        updated_at=now,
+        version=1,
+    )
+
+
+def test_backfill_modes_are_exclusive() -> None:
+    job = _backfill_job({"repositoryId": str(uuid4()), "reviewsOnly": True, "riskOnly": True})
+
+    with pytest.raises(PermanentJobError, match="exclusive"):
+        backfill_repository.handle_backfill_repository(MagicMock(), job, "test-worker")
+
+
+@pytest.mark.integration
+def test_reviews_only_backfill_refreshes_merged_pull_requests_in_the_window(
+    database_engine: Engine,
+    review_rows: ReviewRows,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+
+    def merged(github_id: int, number: int, merged_at: datetime) -> UUID:
+        return upsert_pull_request(
+            database_engine,
+            review_rows.workspace_id,
+            review_rows.repository_id,
+            {
+                **_pull_request(merged_at, draft=False),
+                "id": github_id,
+                "number": number,
+                "state": "closed",
+                "merged": True,
+                "created_at": (merged_at - timedelta(hours=5)).isoformat(),
+                "closed_at": merged_at.isoformat(),
+                "merged_at": merged_at.isoformat(),
+            },
+            "closed",
+        )
+
+    recent_id = merged(6001, 21, now - timedelta(days=2))
+    old_id = merged(6002, 22, now - timedelta(days=120))
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.list_pull_request_reviews.return_value = [
+        _review(1, "APPROVED", (now - timedelta(days=2, hours=3)).isoformat())
+    ]
+    monkeypatch.setattr(backfill_repository, "GithubClient", MagicMock(return_value=client))
+    monkeypatch.setattr(backfill_repository, "get_settings", MagicMock())
+
+    backfill_repository.handle_backfill_repository(
+        database_engine,
+        _backfill_job({"repositoryId": str(review_rows.repository_id), "reviewsOnly": True}),
+        "test-worker",
+    )
+
+    # Only the PR merged inside the default 90-day window is refreshed.
+    client.list_pull_request_reviews.assert_called_once_with("adept", "api", 21)
+    with database_engine.connect() as connection:
+        reviewed = dict(
+            connection.execute(
+                text(
+                    """
+                    SELECT pull_request_id, count(*) FROM pull_request_reviews
+                    WHERE pull_request_id IN (:recent, :old) GROUP BY pull_request_id
+                    """
+                ),
+                {"recent": recent_id, "old": old_id},
+            ).all()
+        )
+        pickup_samples = connection.execute(
+            text(
+                """
+                SELECT sum(sample_size) FROM metric_snapshots
+                WHERE repository_id = :repository_id
+                  AND metric_type = 'PR_PICKUP_TIME_HOURS'
+                  AND granularity = 'DAY'
+                  AND calculation_version = 'cycle-time-v2'
+                """
+            ),
+            {"repository_id": review_rows.repository_id},
+        ).scalar_one()
+    assert reviewed == {recent_id: 1}
+    assert pickup_samples == 1
