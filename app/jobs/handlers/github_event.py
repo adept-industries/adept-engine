@@ -41,6 +41,8 @@ logger = structlog.get_logger()
 HANDLED_EVENTS = frozenset(
     {
         "pull_request",
+        "pull_request_review",
+        "pull_request_review_comment",
         "issues",
         "workflow_run",
         "deployment_status",
@@ -139,6 +141,19 @@ def _dispatch(
             _required_repository(repository_id),
             bound_logger,
         )
+    elif event_type == "pull_request_review":
+        _handle_pull_request_review(
+            database_engine,
+            payload,
+            action,
+            workspace_id,
+            _required_repository(repository_id),
+            bound_logger,
+        )
+    elif event_type == "pull_request_review_comment":
+        # Every review comment belongs to a review, and GitHub announces that
+        # review separately, so comments carry no extra cycle-time signal.
+        bound_logger.info("pull_request_review_comment_acknowledged")
     elif event_type == "issues":
         _handle_issue(
             database_engine,
@@ -233,6 +248,11 @@ def _handle_pull_request(
                 repository.name,
                 number,
             )
+            reviews = client.list_pull_request_reviews(
+                repository.owner_login,
+                repository.name,
+                number,
+            )
             pr_id = pr_normalizer.upsert_pull_request(
                 database_engine,
                 workspace_id,
@@ -240,6 +260,7 @@ def _handle_pull_request(
                 pr_data,
                 action,
                 commits,
+                reviews,
             )
             if str(pr_data.get("state", "")).lower() == "open":
                 changed_files = _non_negative_changed_files(pr_data)
@@ -289,6 +310,73 @@ def _handle_pull_request(
                     affected_at=min(affected_candidates),
                 )
     bound_logger.info("pull_request_upserted", pr_db_id=str(pr_id), action=action)
+
+
+def _handle_pull_request_review(
+    database_engine: Engine,
+    payload: dict[str, Any],
+    action: str | None,
+    workspace_id: UUID,
+    repository_id: UUID,
+    bound_logger: Any,
+) -> None:
+    supported_actions = {"submitted", "edited", "dismissed"}
+    if action not in supported_actions:
+        bound_logger.info(
+            "pull_request_review_action_skipped", action=action, supported=sorted(supported_actions)
+        )
+        return
+    webhook_pr = payload.get("pull_request")
+    number = webhook_pr.get("number") if isinstance(webhook_pr, dict) else None
+    if not isinstance(number, int) or isinstance(number, bool):
+        raise PermanentJobError("GitHub review event is missing pull_request.number")
+
+    pr_id = _pull_request_id(database_engine, repository_id, number)
+    if pr_id is None:
+        # The review arrived before (or without) its pull request delivery, so
+        # import the whole pull request, which also stores its reviews.
+        bound_logger.info("pull_request_review_importing_unknown_pull_request", number=number)
+        _handle_pull_request(
+            database_engine,
+            {"pull_request": webhook_pr},
+            "synchronize",
+            workspace_id,
+            repository_id,
+            bound_logger,
+        )
+        return
+
+    repository = load_github_repository(database_engine, repository_id)
+    try:
+        with GithubClient(get_settings(), repository.installation_id) as client:
+            # The list endpoint is authoritative for dismissals and edits that a
+            # single delayed delivery cannot describe.
+            reviews = client.list_pull_request_reviews(
+                repository.owner_login, repository.name, number
+            )
+    except Exception as exc:
+        converted = provider_exception_as_job_error(exc)
+        if converted is exc:
+            raise
+        raise converted from exc
+    pr_normalizer.replace_pull_request_reviews(database_engine, pr_id, reviews)
+    bound_logger.info(
+        "pull_request_reviews_replaced", pr_db_id=str(pr_id), review_count=len(reviews)
+    )
+
+
+def _pull_request_id(database_engine: Engine, repository_id: UUID, number: int) -> UUID | None:
+    with database_engine.connect() as connection:
+        value = connection.execute(
+            text(
+                """
+                SELECT id FROM pull_requests
+                WHERE repository_id = :repository_id AND number = :number
+                """
+            ),
+            {"repository_id": repository_id, "number": number},
+        ).scalar_one_or_none()
+    return UUID(str(value)) if value is not None else None
 
 
 def _handle_issue(

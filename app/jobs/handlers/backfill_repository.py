@@ -181,6 +181,11 @@ def _process_open_pull_request_page(
             repository.name,
             number,
         )
+        reviews = client.list_pull_request_reviews(
+            repository.owner_login,
+            repository.name,
+            number,
+        )
         pull_request_id = upsert_pull_request(
             database_engine,
             repository.workspace_id,
@@ -188,6 +193,7 @@ def _process_open_pull_request_page(
             pull_request,
             "synchronize",
             commits,
+            reviews,
         )
         changed_files = _changed_files(pull_request)
         if changed_files > 3_000:
@@ -244,6 +250,11 @@ def _process_pull_request_page(
             repository.name,
             number,
         )
+        reviews = client.list_pull_request_reviews(
+            repository.owner_login,
+            repository.name,
+            number,
+        )
         upsert_pull_request(
             database_engine,
             repository.workspace_id,
@@ -251,6 +262,7 @@ def _process_pull_request_page(
             pull_request,
             "closed",
             commits,
+            reviews,
         )
         count += 1
 

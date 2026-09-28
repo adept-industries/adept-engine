@@ -80,6 +80,9 @@ def test_open_pull_request_event_scores_current_provider_state(
     client.get_pull_request.return_value = current_pull_request
     client.list_pull_request_commits.return_value = commits
     client.list_pull_request_files.return_value = files
+    reviews = [{"id": 7, "state": "APPROVED", "submitted_at": "2026-09-01T10:00:00Z"}]
+    client.list_pull_request_reviews.return_value = reviews
+    upsert = MagicMock(return_value=pull_request_id)
     score = MagicMock()
 
     monkeypatch.setattr(github_event, "GithubClient", MagicMock(return_value=client))
@@ -94,11 +97,7 @@ def test_open_pull_request_event_scores_current_provider_state(
             )
         ),
     )
-    monkeypatch.setattr(
-        github_event.pr_normalizer,
-        "upsert_pull_request",
-        MagicMock(return_value=pull_request_id),
-    )
+    monkeypatch.setattr(github_event.pr_normalizer, "upsert_pull_request", upsert)
     monkeypatch.setattr(github_event, "calculate_and_persist_pull_request_risk", score)
     monkeypatch.setattr(github_event, "_pull_request_is_merged", MagicMock(return_value=False))
 
@@ -116,6 +115,8 @@ def test_open_pull_request_event_scores_current_provider_state(
     client.list_pull_request_files.assert_called_once_with("adept-industries", "adept-engine", 42)
     score.assert_called_once()
     assert score.call_args.args[4:] == (current_pull_request, files, commits)
+    client.list_pull_request_reviews.assert_called_once_with("adept-industries", "adept-engine", 42)
+    assert upsert.call_args.args[3:] == (current_pull_request, "synchronize", commits, reviews)
 
 
 def test_closed_pull_request_event_normalizes_without_rescoring(
@@ -191,3 +192,100 @@ def test_issue_event_routes_to_issue_normalizer(monkeypatch: pytest.MonkeyPatch)
         repository_id,
         payload["issue"],
     )
+
+
+def _review_repository() -> SimpleNamespace:
+    return SimpleNamespace(installation_id=99, owner_login="adept-industries", name="adept-engine")
+
+
+def test_review_event_replaces_reviews_from_provider_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    pull_request_id = uuid4()
+    reviews = [{"id": 1, "state": "DISMISSED", "submitted_at": "2026-09-01T10:00:00Z"}]
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.list_pull_request_reviews.return_value = reviews
+    replace = MagicMock()
+    full_sync = MagicMock()
+    database_engine = MagicMock()
+    monkeypatch.setattr(github_event, "GithubClient", MagicMock(return_value=client))
+    monkeypatch.setattr(
+        github_event, "load_github_repository", MagicMock(return_value=_review_repository())
+    )
+    monkeypatch.setattr(github_event, "_pull_request_id", MagicMock(return_value=pull_request_id))
+    monkeypatch.setattr(github_event.pr_normalizer, "replace_pull_request_reviews", replace)
+    monkeypatch.setattr(github_event, "_handle_pull_request", full_sync)
+
+    github_event._dispatch(
+        database_engine,
+        "pull_request_review",
+        "dismissed",
+        {"action": "dismissed", "pull_request": {"number": 42}},
+        uuid4(),
+        uuid4(),
+        "WORKFLOW_RUN",
+        MagicMock(),
+    )
+
+    client.list_pull_request_reviews.assert_called_once_with("adept-industries", "adept-engine", 42)
+    replace.assert_called_once_with(database_engine, pull_request_id, reviews)
+    full_sync.assert_not_called()
+
+
+def test_review_event_for_unknown_pull_request_imports_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    full_sync = MagicMock()
+    replace = MagicMock()
+    monkeypatch.setattr(github_event, "_pull_request_id", MagicMock(return_value=None))
+    monkeypatch.setattr(github_event, "_handle_pull_request", full_sync)
+    monkeypatch.setattr(github_event.pr_normalizer, "replace_pull_request_reviews", replace)
+    workspace_id = uuid4()
+    repository_id = uuid4()
+    webhook_pr = {"number": 42}
+
+    github_event._dispatch(
+        MagicMock(),
+        "pull_request_review",
+        "submitted",
+        {"pull_request": webhook_pr},
+        workspace_id,
+        repository_id,
+        "WORKFLOW_RUN",
+        MagicMock(),
+    )
+
+    full_sync.assert_called_once()
+    assert full_sync.call_args.args[1:5] == (
+        {"pull_request": webhook_pr},
+        "synchronize",
+        workspace_id,
+        repository_id,
+    )
+    replace.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("event_type", "action"),
+    [("pull_request_review", "requested"), ("pull_request_review_comment", "created")],
+)
+def test_review_events_without_cycle_time_signal_make_no_provider_calls(
+    monkeypatch: pytest.MonkeyPatch, event_type: str, action: str
+) -> None:
+    github_client = MagicMock()
+    lookup = MagicMock()
+    monkeypatch.setattr(github_event, "GithubClient", github_client)
+    monkeypatch.setattr(github_event, "_pull_request_id", lookup)
+
+    github_event._dispatch(
+        MagicMock(),
+        event_type,
+        action,
+        {"pull_request": {"number": 42}},
+        uuid4(),
+        uuid4(),
+        "WORKFLOW_RUN",
+        MagicMock(),
+    )
+
+    github_client.assert_not_called()
+    lookup.assert_not_called()

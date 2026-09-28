@@ -155,6 +155,24 @@ class GithubClient:
                 return commits
             page += 1
 
+    def list_pull_request_reviews(
+        self, owner: str, repository: str, number: int
+    ) -> list[dict[str, Any]]:
+        """Return every submitted review for one pull request, oldest first."""
+        reviews: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            body = self._request_json(
+                "GET",
+                f"/repos/{owner}/{repository}/pulls/{number}/reviews",
+                params={"page": page, "per_page": 100},
+            )
+            batch = _list_body(body)
+            reviews.extend(batch)
+            if len(batch) < 100:
+                return reviews
+            page += 1
+
     def list_pull_request_files(
         self, owner: str, repository: str, number: int
     ) -> list[dict[str, Any]]:
