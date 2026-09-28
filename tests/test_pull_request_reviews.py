@@ -247,12 +247,15 @@ def test_recalculation_measures_review_stages_from_human_reviews(
                     SELECT metric_type, value, sample_size, dimensions
                     FROM metric_snapshots
                     WHERE repository_id = :repository_id
-                      AND granularity = 'WEEK'
+                      AND granularity = 'DAY'
                       AND calculation_version = 'cycle-time-v2'
-                      AND period_start = :monday
+                      AND period_start = :merge_day
                     """
                 ),
-                {"repository_id": review_rows.repository_id, "monday": monday},
+                {
+                    "repository_id": review_rows.repository_id,
+                    "merge_day": monday + timedelta(days=2),
+                },
             )
             .mappings()
             .all()
