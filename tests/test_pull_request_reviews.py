@@ -244,7 +244,7 @@ def test_recalculation_measures_review_stages_from_human_reviews(
                     FROM metric_snapshots
                     WHERE repository_id = :repository_id
                       AND granularity = 'WEEK'
-                      AND calculation_version = 'cycle-time-v1'
+                      AND calculation_version = 'cycle-time-v2'
                       AND period_start = :monday
                     """
                 ),
@@ -257,11 +257,14 @@ def test_recalculation_measures_review_stages_from_human_reviews(
     assert values == {
         "PR_CODING_TIME_HOURS": 6.0,
         "PR_PICKUP_TIME_HOURS": 44.0,
-        "PR_REVIEW_TIME_HOURS": 5.0,
-        "PR_MERGE_TIME_HOURS": 1.0,
+        "PR_REVIEW_TIME_HOURS": 6.0,
         "PR_DEPLOY_TIME_HOURS": 17.0,
     }
     pickup = next(row for row in rows if row["metric_type"] == "PR_PICKUP_TIME_HOURS")
     assert pickup["sample_size"] == 1
     observation = pickup["dimensions"]["observations"][0]
-    assert (observation["size"], observation["rounds"]) == ("M", 1)
+    assert (observation["size"], observation["merge_hours"], observation["reviewed"]) == (
+        "M",
+        50.0,
+        True,
+    )
