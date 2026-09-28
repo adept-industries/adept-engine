@@ -21,7 +21,7 @@ from app.normalization.deployments import (
     upsert_deployment_from_workflow_run,
 )
 from app.normalization.github_issues import upsert_github_issue
-from app.normalization.pull_requests import upsert_pull_request
+from app.normalization.pull_requests import replace_pull_request_reviews, upsert_pull_request
 from app.providers.github import GithubClient, ProviderPage
 from app.risk.service import calculate_and_persist_pull_request_risk
 
@@ -32,6 +32,9 @@ PULL_REQUEST_STAGE = "pull_requests"
 WORKFLOW_RUN_STAGE = "workflow_runs"
 DEPLOYMENT_STAGE = "deployments"
 ISSUE_STAGE = "issues"
+REVIEW_STAGE = "reviews"
+# Merged PRs whose reviews are refreshed per job lease; one GitHub call each.
+REVIEW_PAGE_SIZE = 50
 
 
 def handle_backfill_repository(database_engine: Engine, job: ClaimedJob, worker_id: str) -> None:
@@ -39,15 +42,16 @@ def handle_backfill_repository(database_engine: Engine, job: ClaimedJob, worker_
     backfill_days = _bounded_days(job.payload.get("backfillDays", 90))
     risk_only = job.payload.get("riskOnly") is True
     issues_only = job.payload.get("issuesOnly") is True
-    if risk_only and issues_only:
-        raise PermanentJobError("backfill cannot be both risk-only and issues-only")
+    reviews_only = job.payload.get("reviewsOnly") is True
+    if risk_only + issues_only + reviews_only > 1:
+        raise PermanentJobError("backfill risk, issue and review modes are exclusive")
     started_at = _started_at(job.payload.get("backfillStartedAt"))
     cutoff = started_at - timedelta(days=backfill_days)
     cursor = _cursor(
         job.payload.get("cursor"),
         cutoff,
         started_at,
-        initial_stage=ISSUE_STAGE if issues_only else OPEN_PULL_REQUEST_STAGE,
+        initial_stage=_initial_stage(issues_only=issues_only, reviews_only=reviews_only),
     )
     repository = load_github_repository(database_engine, repository_id)
 
@@ -85,6 +89,7 @@ def handle_backfill_repository(database_engine: Engine, job: ClaimedJob, worker_
                 cursor,
                 risk_only,
                 issues_only,
+                reviews_only,
             )
     except Exception as exc:
         converted = provider_exception_as_job_error(exc)
@@ -110,7 +115,16 @@ def handle_backfill_repository(database_engine: Engine, job: ClaimedJob, worker_
         )
         return
 
-    if not risk_only and not issues_only:
+    if reviews_only:
+        # Reviews only change cycle-time stages, which the full window rebuilds.
+        recalculate_repository_metrics(
+            database_engine,
+            repository.workspace_id,
+            repository.id,
+            from_date=cutoff,
+            to_date=started_at + timedelta(days=1),
+        )
+    elif not risk_only and not issues_only:
         reclassify_repository_deployments(database_engine, repository.id)
         recalculate_repository_metrics(
             database_engine,
@@ -134,7 +148,14 @@ def _process_page(
     cursor: dict[str, Any],
     risk_only: bool,
     issues_only: bool,
+    reviews_only: bool,
 ) -> tuple[dict[str, Any] | None, int]:
+    if reviews_only:
+        if stage != REVIEW_STAGE:
+            raise PermanentJobError("reviews-only backfill cannot process non-review stages")
+        return _process_review_page(database_engine, client, repository, page, cutoff)
+    if stage == REVIEW_STAGE:
+        raise PermanentJobError("review stage requires a reviews-only backfill")
     if issues_only:
         if stage != ISSUE_STAGE:
             raise PermanentJobError("issues-only backfill cannot process non-issue stages")
@@ -225,6 +246,47 @@ def _process_open_pull_request_page(
     if risk_only:
         return None, count
     return {"stage": PULL_REQUEST_STAGE, "page": 1}, count
+
+
+def _process_review_page(
+    database_engine: Engine,
+    client: GithubClient,
+    repository: Any,
+    page: int,
+    cutoff: datetime,
+) -> tuple[dict[str, Any] | None, int]:
+    """Refresh reviews of already-normalized PRs merged since ``cutoff``.
+
+    Used once when review ingestion is introduced, so PRs merged before then
+    are not reported as merged without a review. New merges append to the end
+    of this ordering, so offset pages stay stable while the job runs.
+    """
+    with database_engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                """
+                SELECT id, number
+                FROM pull_requests
+                WHERE repository_id = :repository_id
+                  AND state = 'MERGED'
+                  AND merged_at >= :cutoff
+                ORDER BY merged_at ASC, id ASC
+                LIMIT :limit OFFSET :offset
+                """
+            ),
+            {
+                "repository_id": str(repository.id),
+                "cutoff": cutoff,
+                "limit": REVIEW_PAGE_SIZE,
+                "offset": (page - 1) * REVIEW_PAGE_SIZE,
+            },
+        ).all()
+    for pull_request_id, number in rows:
+        reviews = client.list_pull_request_reviews(repository.owner_login, repository.name, number)
+        replace_pull_request_reviews(database_engine, pull_request_id, reviews)
+    if len(rows) == REVIEW_PAGE_SIZE:
+        return {"stage": REVIEW_STAGE, "page": page + 1}, len(rows)
+    return None, len(rows)
 
 
 def _process_pull_request_page(
@@ -446,6 +508,14 @@ def _process_issue_page(
     return None, count
 
 
+def _initial_stage(*, issues_only: bool, reviews_only: bool) -> str:
+    if issues_only:
+        return ISSUE_STAGE
+    if reviews_only:
+        return REVIEW_STAGE
+    return OPEN_PULL_REQUEST_STAGE
+
+
 def _cursor(
     value: object,
     cutoff: datetime,
@@ -464,6 +534,7 @@ def _cursor(
         WORKFLOW_RUN_STAGE,
         DEPLOYMENT_STAGE,
         ISSUE_STAGE,
+        REVIEW_STAGE,
     }:
         raise PermanentJobError("Invalid backfill cursor stage")
     page = value.get("page")
