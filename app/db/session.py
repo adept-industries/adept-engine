@@ -4,7 +4,10 @@ from sqlalchemy import Engine, create_engine, text
 
 from app.core.config import get_settings
 
-SUPPORTED_SCHEMA_VERSIONS = frozenset(str(version) for version in range(7, 18))
+# This release reads and writes the V17 review tables and columns, so older
+# schemas are rejected instead of failing every pull request sync. The worker
+# waits (restarting) until the API has migrated, then processes queued jobs.
+SUPPORTED_SCHEMA_VERSIONS = frozenset({"17"})
 
 
 @lru_cache
@@ -44,5 +47,5 @@ def current_schema_version(database_engine: Engine) -> str:
 
     schema_version = str(version)
     if schema_version not in SUPPORTED_SCHEMA_VERSIONS or processing_jobs != "processing_jobs":
-        raise RuntimeError("supported Flyway schema V7 through V17 is not ready")
+        raise RuntimeError("supported Flyway schema V17 is not ready")
     return schema_version
