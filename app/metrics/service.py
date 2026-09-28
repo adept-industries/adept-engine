@@ -444,7 +444,12 @@ def _cycle_time_snapshots(
     affected_from: datetime | None,
     affected_to: datetime | None,
 ) -> list[MetricSnapshotResult]:
-    """Calculate review cycle-time stages, bucketed by each PR's merge time."""
+    """Calculate review cycle-time stages, bucketed by each PR's merge day.
+
+    Only DAY snapshots are written: the API regroups their per-PR observations
+    into weeks or months by exact merge time, so coarser snapshots would be
+    unread storage.
+    """
     with database_engine.connect() as connection:
         cycle_affected_from = affected_from
         if affected_from is not None:
@@ -485,7 +490,7 @@ def _cycle_time_snapshots(
                 if cycle_affected_from is not None
                 else get_period_buckets(from_date, to_date, granularity, timezone_name)
             )
-            for granularity in ("DAY", "WEEK", "MONTH")
+            for granularity in ("DAY",)
         }
         all_buckets = [bucket for buckets in buckets_by_granularity.values() for bucket in buckets]
         if not all_buckets:
