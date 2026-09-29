@@ -12,7 +12,7 @@ Project issue ingestion is isolated from DORA and PR-risk recalculation. GitHub 
 
 Code-review cycle time splits each merged pull request into coding (first commit to ready for review), pickup (to the first human review), review (to merge) and deploy (to the first successful production deployment). `pull_request` and `pull_request_review` webhooks and repository backfills store GitHub's review list; bot reviews and authors reviewing their own pull requests are excluded. Stages are stored as daily `cycle-time-v2` snapshots of per-PR observations alongside DORA recalculation; the API groups them into calendar weeks or months by merge time. A reviews-only backfill (`reviewsOnly: true`) refreshes reviews of pull requests merged in the backfill window without re-reading the rest of the repository; API migration V17 queues one per tracked repository so pull requests merged before review ingestion are not reported as unreviewed. Each worker start also queues that backfill for any tracked repository still missing cycle-time history (no daily snapshot at least 30 days old), which repairs a rollout backfill consumed by an older engine.
 
-The API's Flyway migrations exclusively own the schema. The engine requires schema version 17, because it writes the review tables and columns that V17 adds; deploy the API (which runs the migration) before the engine. The engine must not add Alembic or create tables.
+The API's Flyway migrations exclusively own the schema. The engine supports schema versions 17 and 18: V17 adds review tables and columns used by the engine, while V18 adds account onboarding state without changing engine requirements. Deploy the API (which runs migrations) before the engine. The engine must not add Alembic or create tables.
 
 ## Install
 
@@ -46,7 +46,7 @@ published through Caddy or a host port. See
 semantics, settings and the exact Alloy/Compose handoff for monitoring PR 3.
 
 - `GET /health` reports HTTP-process liveness and that process's `modelReady` flag.
-- `GET /ready` requires PostgreSQL and the Flyway V17 schema.
+- `GET /ready` requires PostgreSQL and a supported Flyway V17 or V18 schema.
 
 ## Worker concurrency
 
