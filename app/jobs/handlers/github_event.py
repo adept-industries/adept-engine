@@ -41,6 +41,8 @@ logger = structlog.get_logger()
 HANDLED_EVENTS = frozenset(
     {
         "pull_request",
+        "pull_request_review",
+        "pull_request_review_comment",
         "issues",
         "workflow_run",
         "deployment_status",
@@ -139,6 +141,19 @@ def _dispatch(
             _required_repository(repository_id),
             bound_logger,
         )
+    elif event_type == "pull_request_review":
+        _handle_pull_request_review(
+            database_engine,
+            payload,
+            action,
+            workspace_id,
+            _required_repository(repository_id),
+            bound_logger,
+        )
+    elif event_type == "pull_request_review_comment":
+        # Every review comment belongs to a review, and GitHub announces that
+        # review separately, so comments carry no extra cycle-time signal.
+        bound_logger.info("pull_request_review_comment_acknowledged")
     elif event_type == "issues":
         _handle_issue(
             database_engine,
@@ -233,6 +248,11 @@ def _handle_pull_request(
                 repository.name,
                 number,
             )
+            reviews = client.list_pull_request_reviews(
+                repository.owner_login,
+                repository.name,
+                number,
+            )
             pr_id = pr_normalizer.upsert_pull_request(
                 database_engine,
                 workspace_id,
@@ -240,6 +260,14 @@ def _handle_pull_request(
                 pr_data,
                 action,
                 commits,
+                reviews,
+                # The delivery's snapshot was taken at the transition; the
+                # fresh read above may reflect later pushes or edits.
+                ready_for_review_at=(
+                    _github_timestamp(webhook_pr.get("updated_at"))
+                    if action == "ready_for_review"
+                    else None
+                ),
             )
             if str(pr_data.get("state", "")).lower() == "open":
                 changed_files = _non_negative_changed_files(pr_data)
@@ -273,22 +301,110 @@ def _handle_pull_request(
         if converted is exc:
             raise
         raise converted from exc
-    if _pull_request_is_merged(database_engine, pr_id):
+    merged_at = _pull_request_merged_at(database_engine, pr_id)
+    if merged_at is not None:
         previous_affected_at = earliest_linked_production_deployment(database_engine, pr_id)
         link_deployments_to_pull_requests(database_engine, repository_id)
         current_affected_at = earliest_linked_production_deployment(database_engine, pr_id)
+        # Cycle-time stages are bucketed by merge time; DORA lead time by deployment.
         affected_candidates = [
-            value for value in (previous_affected_at, current_affected_at) if value is not None
+            value
+            for value in (merged_at, previous_affected_at, current_affected_at)
+            if value is not None
         ]
-        if affected_candidates:
-            with database_engine.begin() as connection:
-                enqueue_recalculate_metrics_job(
-                    connection,
-                    workspace_id,
-                    repository_id,
-                    affected_at=min(affected_candidates),
-                )
+        with database_engine.begin() as connection:
+            enqueue_recalculate_metrics_job(
+                connection,
+                workspace_id,
+                repository_id,
+                affected_at=min(affected_candidates),
+                affected_to=max(affected_candidates),
+            )
     bound_logger.info("pull_request_upserted", pr_db_id=str(pr_id), action=action)
+
+
+def _handle_pull_request_review(
+    database_engine: Engine,
+    payload: dict[str, Any],
+    action: str | None,
+    workspace_id: UUID,
+    repository_id: UUID,
+    bound_logger: Any,
+) -> None:
+    supported_actions = {"submitted", "edited", "dismissed"}
+    if action not in supported_actions:
+        bound_logger.info(
+            "pull_request_review_action_skipped", action=action, supported=sorted(supported_actions)
+        )
+        return
+    webhook_pr = payload.get("pull_request")
+    number = webhook_pr.get("number") if isinstance(webhook_pr, dict) else None
+    if not isinstance(number, int) or isinstance(number, bool):
+        raise PermanentJobError("GitHub review event is missing pull_request.number")
+
+    pr_id = _pull_request_id(database_engine, repository_id, number)
+    if pr_id is None:
+        # The review arrived before (or without) its pull request delivery, so
+        # import the whole pull request, which also stores its reviews.
+        bound_logger.info("pull_request_review_importing_unknown_pull_request", number=number)
+        _handle_pull_request(
+            database_engine,
+            {"pull_request": webhook_pr},
+            "synchronize",
+            workspace_id,
+            repository_id,
+            bound_logger,
+        )
+        return
+
+    repository = load_github_repository(database_engine, repository_id)
+    try:
+        with GithubClient(get_settings(), repository.installation_id) as client:
+            # The list endpoint is authoritative for dismissals and edits that a
+            # single delayed delivery cannot describe.
+            reviews = client.list_pull_request_reviews(
+                repository.owner_login, repository.name, number
+            )
+    except Exception as exc:
+        converted = provider_exception_as_job_error(exc)
+        if converted is exc:
+            raise
+        raise converted from exc
+    pr_normalizer.replace_pull_request_reviews(database_engine, pr_id, reviews)
+    merged_at = _pull_request_merged_at(database_engine, pr_id)
+    if merged_at is not None:
+        # Reviews of open PRs are picked up by the recalculation queued at merge.
+        with database_engine.begin() as connection:
+            enqueue_recalculate_metrics_job(
+                connection, workspace_id, repository_id, affected_at=merged_at
+            )
+    bound_logger.info(
+        "pull_request_reviews_replaced", pr_db_id=str(pr_id), review_count=len(reviews)
+    )
+
+
+def _github_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _pull_request_id(database_engine: Engine, repository_id: UUID, number: int) -> UUID | None:
+    with database_engine.connect() as connection:
+        value = connection.execute(
+            text(
+                """
+                SELECT id FROM pull_requests
+                WHERE repository_id = :repository_id AND number = :number
+                """
+            ),
+            {"repository_id": repository_id, "number": number},
+        ).scalar_one_or_none()
+    return UUID(str(value)) if value is not None else None
 
 
 def _handle_issue(
@@ -353,13 +469,18 @@ def _non_negative_changed_files(pull_request: dict[str, Any]) -> int:
     return parsed
 
 
-def _pull_request_is_merged(database_engine: Engine, pull_request_id: UUID) -> bool:
+def _pull_request_merged_at(database_engine: Engine, pull_request_id: UUID) -> datetime | None:
     with database_engine.connect() as connection:
-        state = connection.execute(
-            text("SELECT state FROM pull_requests WHERE id = :pull_request_id"),
+        value = connection.execute(
+            text(
+                """
+                SELECT merged_at FROM pull_requests
+                WHERE id = :pull_request_id AND state = 'MERGED'
+                """
+            ),
             {"pull_request_id": pull_request_id},
-        ).scalar_one()
-    return str(state) == "MERGED"
+        ).scalar_one_or_none()
+    return value if isinstance(value, datetime) else None
 
 
 def _handle_workflow_run(

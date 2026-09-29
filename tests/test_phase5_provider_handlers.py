@@ -935,6 +935,27 @@ def test_repository_backfill_pages_without_spending_retry_attempts(
                 },
             ]
 
+        def list_pull_request_reviews(
+            self, _owner: str, _repository: str, number: int
+        ) -> list[dict[str, Any]]:
+            assert number == 4
+            return [
+                {
+                    "id": 7001,
+                    "user": {"login": "reviewer", "type": "User"},
+                    "state": "APPROVED",
+                    "submitted_at": (now - timedelta(hours=6)).isoformat(),
+                    "commit_id": "abc123",
+                },
+                {
+                    "id": 7002,
+                    "user": {"login": "lint-bot[bot]", "type": "Bot"},
+                    "state": "COMMENTED",
+                    "submitted_at": (now - timedelta(hours=20)).isoformat(),
+                },
+                {"id": 7003, "user": {"login": "drafter"}, "state": "PENDING"},
+            ]
+
         def list_workflow_runs(
             self,
             _owner: str,
@@ -1007,6 +1028,38 @@ def test_repository_backfill_pages_without_spending_retry_attempts(
             ).scalar_one()
             == 1
         )
+        reviews = (
+            connection.execute(
+                text(
+                    """
+                    SELECT prr.github_review_id, prr.reviewer_login, prr.reviewer_is_bot,
+                           prr.state
+                    FROM pull_request_reviews prr
+                    JOIN pull_requests pr ON pr.id = prr.pull_request_id
+                    WHERE pr.repository_id = :id
+                    ORDER BY prr.submitted_at
+                    """
+                ),
+                {"id": provider_rows.repository_id},
+            )
+            .mappings()
+            .all()
+        )
+    # The unsubmitted PENDING draft is not a review yet.
+    assert [dict(row) for row in reviews] == [
+        {
+            "github_review_id": 7002,
+            "reviewer_login": "lint-bot[bot]",
+            "reviewer_is_bot": True,
+            "state": "COMMENTED",
+        },
+        {
+            "github_review_id": 7001,
+            "reviewer_login": "reviewer",
+            "reviewer_is_bot": False,
+            "state": "APPROVED",
+        },
+    ]
 
 
 @pytest.mark.integration

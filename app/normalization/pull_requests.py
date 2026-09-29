@@ -32,17 +32,24 @@ def upsert_pull_request(
     pr_data: dict[str, Any],
     action: str | None = None,
     commits: list[dict[str, Any]] | None = None,
+    reviews: list[dict[str, Any]] | None = None,
+    ready_for_review_at: datetime | None = None,
 ) -> UUID:
     """
     Parse *pr_data* (the ``pull_request`` object from the GitHub event) and
     upsert the corresponding row in ``pull_requests``.
 
+    ``ready_for_review_at`` is the draft-to-ready transition time when the
+    caller knows it exactly, for example from the delivery that announced it.
+
     Returns the database UUID of the upserted row.
     """
-    row = _build_row(workspace_id, repository_id, pr_data, action, commits)
+    row = _build_row(workspace_id, repository_id, pr_data, action, commits, ready_for_review_at)
     pull_request_id = _run_upsert(database_engine, row)
     if commits is not None:
         _replace_commits(database_engine, pull_request_id, commits)
+    if reviews is not None:
+        replace_pull_request_reviews(database_engine, pull_request_id, reviews)
     return pull_request_id
 
 
@@ -57,6 +64,7 @@ def _build_row(
     pr: dict[str, Any],
     action: str | None,
     commits: list[dict[str, Any]] | None,
+    ready_for_review_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Transform a raw GitHub PR dict into a flat dict matching the DB schema."""
     merged = pr.get("merged", False)
@@ -98,6 +106,10 @@ def _build_row(
         "first_commit_at": min(commit_times) if commit_times else None,
         "closed_at": _parse_ts(closed_at_raw),
         "merged_at": _parse_ts(merged_at_raw),
+        # GitHub does not expose the transition time on the PR itself; the
+        # delivery that announces it is the closest trustworthy timestamp.
+        "ready_for_review_at": ready_for_review_at
+        or (_parse_ts(pr.get("updated_at")) if action == "ready_for_review" else None),
         "provider_updated_at": _parse_ts(pr.get("updated_at")),
         "raw_data": pr,
     }
@@ -115,14 +127,14 @@ def _run_upsert(database_engine: Engine, row: dict[str, Any]) -> UUID:
             number, title, state, draft, author_login,
             base_ref, head_ref, head_sha, merge_commit_sha,
             additions, deletions, changed_files, commit_count,
-            opened_at, first_commit_at, closed_at, merged_at,
+            opened_at, first_commit_at, closed_at, merged_at, ready_for_review_at,
             last_synced_at, raw_data, updated_at, version
         ) VALUES (
             :workspace_id, :repository_id, :github_pr_id, :github_node_id,
             :number, :title, :state, :draft, :author_login,
             :base_ref, :head_ref, :head_sha, :merge_commit_sha,
             :additions, :deletions, :changed_files, :commit_count,
-            :opened_at, :first_commit_at, :closed_at, :merged_at,
+            :opened_at, :first_commit_at, :closed_at, :merged_at, :ready_for_review_at,
             COALESCE(:provider_updated_at, now()), :raw_data, now(), 0
         )
         ON CONFLICT (repository_id, github_pr_id)
@@ -144,6 +156,9 @@ def _run_upsert(database_engine: Engine, row: dict[str, Any]) -> UUID:
             first_commit_at   = EXCLUDED.first_commit_at,
             closed_at         = EXCLUDED.closed_at,
             merged_at         = EXCLUDED.merged_at,
+            ready_for_review_at = COALESCE(
+                EXCLUDED.ready_for_review_at, pull_requests.ready_for_review_at
+            ),
             last_synced_at    = EXCLUDED.last_synced_at,
             raw_data          = EXCLUDED.raw_data,
             updated_at        = now(),
@@ -234,6 +249,61 @@ def _replace_commits(
             ),
             {"pull_request_id": pull_request_id},
         )
+
+
+_REVIEW_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"})
+
+
+def replace_pull_request_reviews(
+    database_engine: Engine,
+    pull_request_id: UUID,
+    reviews: list[dict[str, Any]],
+) -> None:
+    """Replace a PR's reviews with GitHub's current list so redeliveries converge."""
+    rows = [
+        {
+            "pull_request_id": pull_request_id,
+            "github_review_id": review_id,
+            "reviewer_login": _nested(review, "user", "login"),
+            "reviewer_is_bot": _is_bot(review),
+            "state": state,
+            "submitted_at": submitted_at,
+            "commit_sha": review.get("commit_id"),
+        }
+        for review in reviews
+        if isinstance(review_id := review.get("id"), int)
+        and not isinstance(review_id, bool)
+        # Pending reviews are drafts that have not been submitted yet.
+        and (state := str(review.get("state", "")).upper()) in _REVIEW_STATES
+        and (submitted_at := _parse_ts(review.get("submitted_at"))) is not None
+    ]
+    with database_engine.begin() as connection:
+        connection.execute(
+            text("DELETE FROM pull_request_reviews WHERE pull_request_id = :pull_request_id"),
+            {"pull_request_id": pull_request_id},
+        )
+        if rows:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO pull_request_reviews (
+                        pull_request_id, github_review_id, reviewer_login,
+                        reviewer_is_bot, state, submitted_at, commit_sha
+                    ) VALUES (
+                        :pull_request_id, :github_review_id, :reviewer_login,
+                        :reviewer_is_bot, :state, :submitted_at, :commit_sha
+                    )
+                    ON CONFLICT (pull_request_id, github_review_id) DO NOTHING
+                    """
+                ),
+                rows,
+            )
+
+
+def _is_bot(review: dict[str, Any]) -> bool:
+    user_type = _nested(review, "user", "type")
+    login = _nested(review, "user", "login")
+    return user_type == "Bot" or (isinstance(login, str) and login.endswith("[bot]"))
 
 
 def _commit_timestamp(commit: dict[str, Any]) -> datetime | None:

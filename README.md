@@ -10,7 +10,9 @@ PR-risk inference uses only the approved `jitfine-expert-pr-risk-mvp-v1` artifac
 
 Project issue ingestion is isolated from DORA and PR-risk recalculation. GitHub `issues` webhooks maintain live state, while issue-only repository jobs backfill every open issue and exclude pull requests returned by GitHub's Issues API. Jira issue-only jobs page through unresolved issues for the explicitly mapped, tracked Jira projects. Completed syncs close or resolve stale local rows that are no longer returned by the providers.
 
-The API's Flyway migrations exclusively own the schema. The engine supports schema versions 7 through 16 during the forward-compatible rollout and must not add Alembic or create tables.
+Code-review cycle time splits each merged pull request into coding (first commit to ready for review), pickup (to the first human review), review (to merge) and deploy (to the first successful production deployment). `pull_request` and `pull_request_review` webhooks and repository backfills store GitHub's review list; bot reviews and authors reviewing their own pull requests are excluded. Stages are stored as daily `cycle-time-v2` snapshots of per-PR observations alongside DORA recalculation; the API groups them into calendar weeks or months by merge time. A reviews-only backfill (`reviewsOnly: true`) refreshes reviews of pull requests merged in the backfill window without re-reading the rest of the repository; API migration V17 queues one per tracked repository so pull requests merged before review ingestion are not reported as unreviewed.
+
+The API's Flyway migrations exclusively own the schema. The engine requires schema version 17, because it writes the review tables and columns that V17 adds; deploy the API (which runs the migration) before the engine. The engine must not add Alembic or create tables.
 
 ## Install
 
@@ -44,7 +46,7 @@ published through Caddy or a host port. See
 semantics, settings and the exact Alloy/Compose handoff for monitoring PR 3.
 
 - `GET /health` reports HTTP-process liveness and that process's `modelReady` flag.
-- `GET /ready` requires PostgreSQL and a supported Flyway V7–V16 schema.
+- `GET /ready` requires PostgreSQL and the Flyway V17 schema.
 
 ## Worker concurrency
 
