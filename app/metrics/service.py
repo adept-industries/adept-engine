@@ -24,7 +24,7 @@ from app.metrics.calculator import (
     get_period_buckets,
     get_recalculation_buckets,
 )
-from app.metrics.cycle_time import calculate_cycle_time_stages
+from app.metrics.cycle_time import CYCLE_TIME_CALCULATION_VERSION, calculate_cycle_time_stages
 
 logger = structlog.get_logger()
 
@@ -605,6 +605,62 @@ def _upsert_snapshots(
     with database_engine.begin() as connection:
         connection.execute(sql, rows)
     return len(rows)
+
+
+def enqueue_missing_cycle_time_history(database_engine: Engine) -> int:
+    """Queue a reviews-only backfill for tracked repositories without cycle-time history.
+
+    Cycle-time snapshots only exist for periods recalculated by this engine
+    version. If the rollout backfill was consumed by an older engine (or never
+    ran), earlier weeks would stay empty forever, because routine recalculation
+    only touches recently affected periods. A repository counts as covered once
+    it has a daily snapshot at least 30 days old; the backfill writes 90 days.
+    Idempotent: repositories with any active backfill are skipped.
+    """
+    with database_engine.begin() as connection:
+        # One worker at a time, so concurrent boots cannot queue duplicates.
+        connection.execute(text("SELECT pg_advisory_xact_lock(hashtext('cycle-time-history'))"))
+        result = connection.execute(
+            text(
+                """
+                INSERT INTO processing_jobs (
+                    workspace_id, repository_id, job_type, payload, priority
+                )
+                SELECT r.workspace_id,
+                       r.id,
+                       'BACKFILL_REPOSITORY',
+                       jsonb_build_object(
+                           'repositoryId', r.id::text,
+                           'backfillDays', 90,
+                           'reviewsOnly', true
+                       ),
+                       200
+                FROM repositories r
+                JOIN github_integrations gi ON gi.id = r.github_integration_id
+                WHERE r.tracking_enabled
+                  AND NOT r.archived
+                  AND gi.status = 'ACTIVE'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM metric_snapshots m
+                      WHERE m.repository_id = r.id
+                        AND m.metric_type = 'PR_CODING_TIME_HOURS'
+                        AND m.granularity = 'DAY'
+                        AND m.calculation_version = :version
+                        AND m.period_start <= now() - interval '30 days'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM processing_jobs j
+                      WHERE j.repository_id = r.id
+                        AND j.job_type = 'BACKFILL_REPOSITORY'
+                        AND j.status IN ('PENDING', 'FAILED', 'RUNNING')
+                  )
+                """
+            ),
+            {"version": CYCLE_TIME_CALCULATION_VERSION},
+        )
+        return int(result.rowcount or 0)
 
 
 def enqueue_recalculate_metrics_job(
