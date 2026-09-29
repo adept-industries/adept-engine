@@ -13,7 +13,7 @@ from sqlalchemy import Engine, text
 from app.db.models import ClaimedJob
 from app.jobs.handlers import backfill_repository
 from app.jobs.retry import PermanentJobError
-from app.metrics.service import recalculate_repository_metrics
+from app.metrics.service import enqueue_missing_cycle_time_history, recalculate_repository_metrics
 from app.normalization.pull_requests import replace_pull_request_reviews, upsert_pull_request
 
 
@@ -367,3 +367,55 @@ def test_reviews_only_backfill_refreshes_merged_pull_requests_in_the_window(
         ).scalar_one()
     assert reviewed == {recent_id: 1}
     assert pickup_samples == 1
+
+
+def _history_jobs(database_engine: Engine, repository_id: UUID) -> list[dict[str, Any]]:
+    with database_engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                """
+                SELECT status, priority, payload FROM processing_jobs
+                WHERE repository_id = :repository_id AND job_type = 'BACKFILL_REPOSITORY'
+                """
+            ),
+            {"repository_id": repository_id},
+        ).mappings()
+        return [dict(row) for row in rows]
+
+
+@pytest.mark.integration
+def test_missing_cycle_time_history_is_backfilled_once(
+    database_engine: Engine, review_rows: ReviewRows
+) -> None:
+    enqueue_missing_cycle_time_history(database_engine)
+    # A second worker boot while the job is pending must not queue another.
+    enqueue_missing_cycle_time_history(database_engine)
+
+    jobs = _history_jobs(database_engine, review_rows.repository_id)
+    assert len(jobs) == 1
+    assert jobs[0]["status"] == "PENDING"
+    assert jobs[0]["priority"] == 200
+    assert jobs[0]["payload"] == {
+        "repositoryId": str(review_rows.repository_id),
+        "backfillDays": 90,
+        "reviewsOnly": True,
+    }
+
+
+@pytest.mark.integration
+def test_repositories_with_cycle_time_history_are_left_alone(
+    database_engine: Engine, review_rows: ReviewRows
+) -> None:
+    # A full-window recalculation writes daily snapshots back to the window start.
+    now = datetime.now(UTC)
+    recalculate_repository_metrics(
+        database_engine,
+        review_rows.workspace_id,
+        review_rows.repository_id,
+        from_date=now - timedelta(days=90),
+        to_date=now + timedelta(days=1),
+    )
+
+    enqueue_missing_cycle_time_history(database_engine)
+
+    assert _history_jobs(database_engine, review_rows.repository_id) == []
