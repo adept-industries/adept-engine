@@ -491,7 +491,7 @@ def test_stale_recovery_callback_records_committed_counts(
         return []
 
     monkeypatch.setattr(worker, "claim_jobs", claim)
-    monkeypatch.setattr(worker, "current_schema_version", MagicMock(return_value="15"))
+    monkeypatch.setattr(worker, "current_schema_version", MagicMock(return_value="18"))
 
     worker.consume_jobs(engine, Settings(), "owner", stop, 1, metrics)
 
@@ -570,7 +570,7 @@ def test_pool_runs_consumers_and_cleans_up_despite_monitoring_failures(
         worker, "get_settings", lambda: Settings(engine_worker_threads=configured_threads)
     )
     monkeypatch.setattr(worker, "get_database_engine", lambda: engine)
-    monkeypatch.setattr(worker, "current_schema_version", lambda _: "15")
+    monkeypatch.setattr(worker, "current_schema_version", lambda _: "18")
     monkeypatch.setattr(worker, "consume_jobs", consume)
     monkeypatch.setattr(worker.signal, "signal", register)
     endpoint = MagicMock()

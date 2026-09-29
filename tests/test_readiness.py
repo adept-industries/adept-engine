@@ -6,10 +6,11 @@ import app.main as main_module
 from app.db.session import SUPPORTED_SCHEMA_VERSIONS, current_schema_version
 
 
-def test_requires_the_review_cycle_time_schema() -> None:
+def test_requires_the_review_cycle_time_schema_and_supports_v18() -> None:
     # V16 lacks pull_request_reviews and ready_for_review_at, which every PR sync writes.
     assert "16" not in SUPPORTED_SCHEMA_VERSIONS
     assert "17" in SUPPORTED_SCHEMA_VERSIONS
+    assert "18" in SUPPORTED_SCHEMA_VERSIONS
 
 
 def test_health_reports_the_embedded_pr_risk_artifact_ready() -> None:
