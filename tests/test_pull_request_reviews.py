@@ -341,8 +341,9 @@ def test_reviews_only_backfill_refreshes_merged_pull_requests_in_the_window(
     # Only the PR merged inside the default 90-day window is refreshed.
     client.list_pull_request_reviews.assert_called_once_with("adept", "api", 21)
     with database_engine.connect() as connection:
-        reviewed = dict(
-            connection.execute(
+        reviewed = {
+            row[0]: row[1]
+            for row in connection.execute(
                 text(
                     """
                     SELECT pull_request_id, count(*) FROM pull_request_reviews
@@ -351,7 +352,7 @@ def test_reviews_only_backfill_refreshes_merged_pull_requests_in_the_window(
                 ),
                 {"recent": recent_id, "old": old_id},
             ).all()
-        )
+        }
         pickup_samples = connection.execute(
             text(
                 """
