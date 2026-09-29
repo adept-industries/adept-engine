@@ -20,6 +20,7 @@ from app.jobs.claimer import StaleJobRecovery, claim_jobs
 from app.jobs.dispatcher import HANDLERS, dispatch_job
 from app.jobs.lease import JobLease, JobScopeBusy
 from app.jobs.retry import RequeueWithPayloadError, requeue_with_payload
+from app.metrics.service import enqueue_missing_cycle_time_history
 from app.monitoring.worker_metrics import MetricsEndpoint, QueueMetricsSampler, WorkerMetrics
 
 logger = structlog.get_logger()
@@ -260,6 +261,14 @@ def run() -> None:
     settings = get_settings()
     database_engine = get_database_engine()
     current_schema_version(database_engine)
+    try:
+        queued = enqueue_missing_cycle_time_history(database_engine)
+    except Exception as exc:
+        # Best effort: a failed check must never keep the worker from starting.
+        logger.warning("cycle_time_history_check_failed", error_type=type(exc).__name__)
+    else:
+        if queued:
+            logger.info("cycle_time_history_backfill_queued", repository_count=queued)
     stop = Event()
     boot_id = uuid4().hex
     metrics = WorkerMetrics(settings.engine_worker_threads, HANDLERS)
