@@ -31,7 +31,7 @@ uv run mypy app tests
 uv run pytest -m "not integration"
 ```
 
-Integration tests require a test database setup:
+Integration tests require a test database setup (password matches `POSTGRES_PASSWORD` in `.env`):
 ```bash
-ENGINE_TEST_DATABASE_ALLOWED=true TEST_DATABASE_URL=postgresql+psycopg://adept:password@localhost:5432/adept_engine_test uv run pytest -m integration
+ENGINE_TEST_DATABASE_ALLOWED=true TEST_DATABASE_URL=postgresql+psycopg://adept:adept_local_password@localhost:5432/adept_engine_test uv run pytest -m integration
 ```
